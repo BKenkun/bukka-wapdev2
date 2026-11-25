@@ -1,0 +1,1350 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model ReferralCode {
+  id                String    @id @default(cuid())
+  code              String    @unique
+  performerId       String?
+  partnerName       String?
+  discountPercent   Decimal   @default(0) @db.Decimal(5, 2)
+  // % de comisión para el creador/partner, sobre el importe neto generado
+  commissionPercent Decimal   @default(0) @db.Decimal(5, 2)
+  label             String?
+  isActive        Boolean   @default(true)
+  maxUses         Int?
+  usedCount       Int       @default(0)
+  totalClicks     Int       @default(0)
+  totalRevenue    Decimal   @default(0) @db.Decimal(12, 2)
+  startDate       DateTime?
+  endDate         DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  performer     Performer?            @relation(fields: [performerId], references: [id], onDelete: Cascade)
+  conversions   ReferralConversion[]
+  orders        Order[]
+  subscriptions SubscriptionHistory[]
+
+  @@index([performerId])
+  @@index([isActive])
+}
+
+model ReferralConversion {
+  id                    String                 @id @default(cuid())
+  referralCodeId        String
+  type                  ReferralConversionType
+  userId                String?
+  orderId               String?                @unique
+  subscriptionHistoryId String?                @unique
+  amount                Decimal                @db.Decimal(10, 2)
+  discountAmount        Decimal                @default(0) @db.Decimal(10, 2)
+  // Comisión devengada para el creador/partner en esta conversión
+  commissionAmount      Decimal                @default(0) @db.Decimal(10, 2)
+  createdAt             DateTime               @default(now())
+
+  referralCode        ReferralCode         @relation(fields: [referralCodeId], references: [id], onDelete: Cascade)
+  user                User?                @relation(fields: [userId], references: [id], onDelete: SetNull)
+  order               Order?               @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  subscriptionHistory SubscriptionHistory? @relation(fields: [subscriptionHistoryId], references: [id], onDelete: SetNull)
+
+  @@index([referralCodeId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model Badge {
+  id          String      @id @default(cuid())
+  slug        String      @unique
+  name        String
+  description String?
+  imageUrl    String?
+  color       String?
+  type        BadgeType
+  autoAward   Boolean     @default(false)
+  criteria    Json?
+  UserBadge   UserBadge[]
+}
+
+model BlogCategory {
+  id          String     @id @default(cuid())
+  slug        String     @unique
+  name        String
+  description String?
+  order       Int        @default(0)
+  BlogPost    BlogPost[]
+}
+
+model BlogPost {
+  id            String        @id @default(cuid())
+  slug          String        @unique
+  title         String
+  excerpt       String?
+  content       String
+  featuredImage String?
+  authorId      String
+  categoryId    String?
+  type          BlogPostType  @default(ARTICLE)
+  status        BlogStatus    @default(DRAFT)
+  publishedAt   DateTime?
+  viewCount     Int           @default(0)
+  likeCount     Int           @default(0)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  user          User          @relation(fields: [authorId], references: [id])
+  BlogCategory  BlogCategory? @relation(fields: [categoryId], references: [id])
+
+  @@index([authorId])
+  @@index([categoryId])
+}
+
+model Cart {
+  id        String     @id @default(cuid())
+  userId    String?    @unique
+  sessionId String?    @unique
+  updatedAt DateTime   @updatedAt
+  user      User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items     CartItem[]
+}
+
+model CartItem {
+  id        String          @id @default(cuid())
+  cartId    String
+  productId String
+  variantId String?
+  quantity  Int             @default(1)
+  cart      Cart            @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  product   Product         @relation(fields: [productId], references: [id])
+  variant   ProductVariant? @relation(fields: [variantId], references: [id])
+
+  @@unique([cartId, productId, variantId])
+  @@index([cartId])
+  @@index([variantId])
+}
+
+model CastingSubmission {
+  id                 String        @id @default(cuid())
+  name               String
+  email              String
+  phone              String?
+  birthDate          DateTime
+  city               String?
+  country            String?
+  gender             String?
+  height             Int?
+  weight             String?
+  bust               String?
+  waist              String?
+  hips               String?
+  hairColor          String?
+  eyeColor           String?
+  skinTone           String?
+  tattoos            String?
+  experience         String?
+  additionalInfo     String?
+  instagram          String?
+  twitter            String?
+  dniPhotoUrl        String?
+  dniBackUrl         String?
+  generalPhotos      String[]
+  videoUrl           String?
+  identityVerified   Boolean       @default(false)
+  identitySimilarity Float?
+  status             CastingStatus @default(PENDING)
+  notes              String?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+}
+
+model Comment {
+  id            String    @id @default(cuid())
+  content       String
+  authorId      String
+  videoId       String
+  parentId      String?
+  likeCount     Int       @default(0)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  user          User      @relation(fields: [authorId], references: [id])
+  Comment       Comment?  @relation("CommentToComment", fields: [parentId], references: [id])
+  other_Comment Comment[] @relation("CommentToComment")
+  video         Video     @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@index([authorId])
+  @@index([videoId])
+}
+
+model DirectMessage {
+  id                                  String   @id @default(cuid())
+  content                             String
+  senderId                            String
+  receiverId                          String
+  isRead                              Boolean  @default(false)
+  createdAt                           DateTime @default(now())
+  User_DirectMessage_receiverIdToUser User     @relation("DirectMessage_receiverIdToUser", fields: [receiverId], references: [id])
+  User_DirectMessage_senderIdToUser   User     @relation("DirectMessage_senderIdToUser", fields: [senderId], references: [id])
+
+  @@index([receiverId])
+  @@index([senderId])
+}
+
+model Favorite {
+  id          String     @id @default(cuid())
+  userId      String
+  videoId     String?
+  performerId String?
+  productId   String?
+  createdAt   DateTime   @default(now())
+  Performer   Performer? @relation(fields: [performerId], references: [id], onDelete: Cascade)
+  Product     Product?   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  Video       Video?     @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, performerId])
+  @@unique([userId, productId])
+  @@unique([userId, videoId])
+}
+
+model ForumCategory {
+  id               String            @id @default(cuid())
+  slug             String            @unique
+  name             String
+  description      String?
+  order            Int               @default(0)
+  minTierPlanId    String?
+  SubscriptionPlan SubscriptionPlan? @relation(fields: [minTierPlanId], references: [id])
+  ForumPost        ForumPost[]
+}
+
+model ForumPost {
+  id            String        @id @default(cuid())
+  title         String
+  content       String
+  authorId      String
+  categoryId    String
+  isPinned      Boolean       @default(false)
+  isLocked      Boolean       @default(false)
+  viewCount     Int           @default(0)
+  likeCount     Int           @default(0)
+  replyCount    Int           @default(0)
+  lastReplyAt   DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  user          User          @relation(fields: [authorId], references: [id])
+  ForumCategory ForumCategory @relation(fields: [categoryId], references: [id])
+  ForumReply    ForumReply[]
+  likes         ForumLike[]
+  poll          ForumPoll?
+
+  @@index([authorId])
+  @@index([categoryId])
+}
+
+model ForumReply {
+  id               String       @id @default(cuid())
+  content          String
+  authorId         String
+  postId           String
+  parentId         String?
+  likeCount        Int          @default(0)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+  user             User         @relation(fields: [authorId], references: [id])
+  ForumReply       ForumReply?  @relation("ForumReplyToForumReply", fields: [parentId], references: [id])
+  other_ForumReply ForumReply[] @relation("ForumReplyToForumReply")
+  ForumPost        ForumPost    @relation(fields: [postId], references: [id], onDelete: Cascade)
+  likes            ForumLike[]
+
+  @@index([authorId])
+  @@index([postId])
+}
+
+// Encuestas estilo WhatsApp en hilos del foro
+model ForumPoll {
+  id        String    @id @default(cuid())
+  postId    String    @unique
+  question  String
+  multiple  Boolean   @default(false)
+  endsAt    DateTime?
+  createdAt DateTime  @default(now())
+  post      ForumPost         @relation(fields: [postId], references: [id], onDelete: Cascade)
+  options   ForumPollOption[]
+}
+
+model ForumPollOption {
+  id     String @id @default(cuid())
+  pollId String
+  text   String
+  order  Int    @default(0)
+  poll   ForumPoll       @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  votes  ForumPollVote[]
+
+  @@index([pollId])
+}
+
+model ForumPollVote {
+  id        String   @id @default(cuid())
+  optionId  String
+  userId    String
+  createdAt DateTime @default(now())
+  option    ForumPollOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([optionId, userId])
+  @@index([userId])
+}
+
+model ForumLike {
+  id        String      @id @default(cuid())
+  userId    String
+  postId    String?
+  replyId   String?
+  createdAt DateTime    @default(now())
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post      ForumPost?  @relation(fields: [postId], references: [id], onDelete: Cascade)
+  reply     ForumReply? @relation(fields: [replyId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, postId])
+  @@unique([userId, replyId])
+  @@index([userId])
+  @@index([postId])
+  @@index([replyId])
+}
+
+model HomeSection {
+  id        String          @id @default(cuid())
+  type      HomeSectionType
+  title     String?
+  enabled   Boolean         @default(true)
+  order     Int             @default(0)
+  config    Json?
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+}
+
+model ShopSection {
+  id        String          @id @default(cuid())
+  type      ShopSectionType
+  title     String?
+  enabled   Boolean         @default(true)
+  order     Int             @default(0)
+  config    Json?
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+}
+
+model Menu {
+  id          String     @id @default(cuid())
+  name        String
+  slug        String     @unique
+  title       String? // Título visible en el frontend (ej: "SERVICIOS", "CONTACTO")
+  description String?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  items       MenuItem[]
+}
+
+model MenuItem {
+  id             String          @id @default(cuid())
+  menuId         String
+  label          String
+  url            String?
+  pageId         String?
+  icon           String?
+  customIcon     String?
+  parentId       String?
+  order          Int             @default(0)
+  openInNewTab   Boolean         @default(false)
+  isVisible      Boolean         @default(true)
+  highlight      Boolean         @default(false)
+  highlightColor String?
+  minTierLevel   Int? // Nivel mínimo de suscripción requerido (null = visible para todos)
+  hasMegamenu    Boolean         @default(false)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  menu           Menu            @relation(fields: [menuId], references: [id], onDelete: Cascade)
+  parent         MenuItem?       @relation("MenuItemToMenuItem", fields: [parentId], references: [id], onDelete: Cascade)
+  children       MenuItem[]      @relation("MenuItemToMenuItem")
+  megamenuConfig MegamenuConfig?
+
+  @@index([menuId])
+  @@index([parentId])
+}
+
+model MegamenuConfig {
+  id                   String          @id @default(cuid())
+  menuItemId           String          @unique
+  featuredPerformerIds String[]
+  featuredProductIds   String[]        @default([])
+  videoSource          VideoSourceType @default(MANUAL)
+  videoIds             String[]
+  videoCategoryId      String?
+  links                Json            @default("[]")
+  linksSectionTitle    String          @default("Descubre")
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+  menuItem             MenuItem        @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+}
+
+model Order {
+  id                  String              @id @default(cuid())
+  orderNumber         String              @unique
+  userId              String?
+  guestEmail          String?
+  guestName           String?
+  subtotal            Decimal             @db.Decimal(10, 2)
+  discount            Decimal             @default(0) @db.Decimal(10, 2)
+  tax                 Decimal             @default(0) @db.Decimal(10, 2)
+  shipping            Decimal             @default(0) @db.Decimal(10, 2)
+  total               Decimal             @db.Decimal(10, 2)
+  tierDiscountPercent Int                 @default(0)
+  shippingMethod      String?
+  shippingZoneId      String?
+  estimatedDelivery   DateTime?
+  status              OrderStatus         @default(PENDING)
+  paymentStatus       PaymentStatus       @default(PENDING)
+  shippingAddress     Json?
+  billingAddress      Json?
+  trackingNumber      String?
+  // Referencia del borrador/envío creado en Packlink PRO
+  packlinkReference   String?
+  paymentGateway      String?
+  transactionId       String?
+  riskLevel           ProductRiskLevel    @default(LOW_RISK)
+  referralCodeId      String?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  user                User?               @relation(fields: [userId], references: [id])
+  referralCode        ReferralCode?       @relation(fields: [referralCodeId], references: [id], onDelete: SetNull)
+  referralConversion  ReferralConversion?
+  OrderItem           OrderItem[]
+
+  @@index([userId])
+  @@index([guestEmail])
+  @@index([referralCodeId])
+}
+
+model OrderItem {
+  id              String          @id @default(cuid())
+  orderId         String
+  productId       String
+  variantId       String?
+  quantity        Int
+  price           Decimal         @db.Decimal(10, 2)
+  variantSnapshot Json?
+  order           Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product         Product         @relation(fields: [productId], references: [id])
+  variant         ProductVariant? @relation(fields: [variantId], references: [id])
+
+  @@index([orderId])
+  @@index([variantId])
+}
+
+model Page {
+  id              String     @id @default(cuid())
+  slug            String     @unique
+  title           String
+  content         String
+  excerpt         String?
+  metaTitle       String?
+  metaDescription String?
+  showInFooter    Boolean    @default(false)
+  footerColumn    Int?
+  footerOrder     Int        @default(0)
+  status          PageStatus @default(DRAFT)
+  publishedAt     DateTime?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+}
+
+model Performer {
+  id              String             @id @default(cuid())
+  slug            String             @unique
+  name            String
+  bio             String?
+  profileImage    String?
+  coverImage      String?
+  galleryImages   String[]
+  location        String? // e.g. "Los Angeles, California" or "Madrid, España"
+  videoCount      Int                @default(0)
+  verified        Boolean            @default(false)
+  comingSoon      Boolean            @default(false)
+  comingSoonDate  DateTime?
+  releasedAt      DateTime?
+  userId          String?            @unique
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  favorites       Favorite[]
+  User            User?              @relation(fields: [userId], references: [id])
+  PerformerPhoto  PerformerPhoto[]
+  products        ProductPerformer[]
+  VideoPerformer  VideoPerformer[]
+  PerformerNotify PerformerNotify[]
+  ReferralCode    ReferralCode[]
+  PerformerTag    PerformerTag[]
+}
+
+model PerformerPhoto {
+  id          String    @id @default(cuid())
+  performerId String
+  imageUrl    String
+  caption     String?
+  order       Int       @default(0)
+  createdAt   DateTime  @default(now())
+  performer   Performer @relation(fields: [performerId], references: [id], onDelete: Cascade)
+  tags        PerformerPhotoTag[]
+
+  @@index([performerId])
+}
+
+model PerformerPhotoTag {
+  photoId String
+  tagId   String
+  photo   PerformerPhoto @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  tag     Tag            @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([photoId, tagId])
+}
+
+model PerformerNotify {
+  id          String    @id @default(cuid())
+  userId      String
+  performerId String
+  notified    Boolean   @default(false)
+  notifiedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  performer Performer @relation(fields: [performerId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, performerId])
+  @@index([performerId, notified])
+}
+
+model Product {
+  id                String              @id @default(cuid())
+  slug              String              @unique
+  name              String
+  description       String?
+  productType       ProductType         @default(SIMPLE)
+  price             Decimal             @db.Decimal(10, 2)
+  compareAtPrice    Decimal?            @db.Decimal(10, 2)
+  sku               String?             @unique
+  stock             Int                 @default(0)
+  weight            Decimal?            @db.Decimal(10, 3)
+  trackInventory    Boolean             @default(true)
+  images            String[]
+  riskLevel         ProductRiskLevel    @default(LOW_RISK)
+  status            ProductStatus       @default(DRAFT)
+  metadata          Json?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  CartItem          CartItem[]
+  favorites         Favorite[]
+  OrderItem         OrderItem[]
+  performers        ProductPerformer[]
+  ProductTag        ProductTag[]
+  ProductToCategory ProductToCategory[]
+  VideoProduct      VideoProduct[]
+  variants          ProductVariant[]
+  attributes        ProductAttribute[]
+}
+
+model ProductTag {
+  productId String
+  tagId     String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  tag       Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([productId, tagId])
+}
+
+model ProductToCategory {
+  productId    String
+  categoryId   String
+  ShopCategory ShopCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  product      Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@id([productId, categoryId])
+}
+
+model PromoCode {
+  id             String            @id @default(cuid())
+  code           String            @unique
+  discountType   DiscountType
+  discountValue  Decimal           @db.Decimal(10, 2)
+  applicableTo   PromoApplicableTo
+  maxUses        Int?
+  usedCount      Int               @default(0)
+  maxUsesPerUser Int?
+  startDate      DateTime?
+  endDate        DateTime?
+  isActive       Boolean           @default(true)
+  createdAt      DateTime          @default(now())
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model ShopCategory {
+  id                 String              @id @default(cuid())
+  slug               String              @unique
+  name               String
+  description        String?
+  imageUrl           String?
+  order              Int                 @default(0)
+  parentId           String?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  ProductToCategory  ProductToCategory[]
+  ShopCategory       ShopCategory?       @relation("ShopCategoryToShopCategory", fields: [parentId], references: [id])
+  other_ShopCategory ShopCategory[]      @relation("ShopCategoryToShopCategory")
+}
+
+model SiteSettings {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model SubscriptionHistory {
+  id                 String              @id @default(cuid())
+  userId             String
+  planId             String
+  startDate          DateTime
+  endDate            DateTime?
+  amount             Decimal             @db.Decimal(10, 2)
+  currency           String              @default("EUR")
+  paymentGateway     String
+  transactionId      String?
+  invoiceUrl         String?
+  referralCodeId     String?
+  createdAt          DateTime            @default(now())
+  SubscriptionPlan   SubscriptionPlan    @relation(fields: [planId], references: [id])
+  user               User                @relation(fields: [userId], references: [id])
+  referralCode       ReferralCode?       @relation(fields: [referralCodeId], references: [id], onDelete: SetNull)
+  referralConversion ReferralConversion?
+
+  @@index([planId])
+  @@index([userId])
+  @@index([referralCodeId])
+}
+
+model SubscriptionPlan {
+  id                      String                @id @default(cuid())
+  slug                    String                @unique
+  name                    String
+  description             String?
+  level                   Int                   @default(0)
+  icon                    String?
+  monthlyPrice            Decimal               @default(0) @db.Decimal(10, 2)
+  yearlyPrice             Decimal?              @db.Decimal(10, 2)
+  features                Json                  @default("[]")
+  maxVideoQuality         String                @default("720p")
+  canComment              Boolean               @default(false)
+  canAccessForum          Boolean               @default(false)
+  canDownload             Boolean               @default(false)
+  canAccessLimitedEdition Boolean               @default(false)
+  canAccessExclusive      Boolean               @default(false)
+  earlyAccessDays         Int                   @default(0) // Días de acceso anticipado a Limited Edition
+  shopDiscount            Int                   @default(0)
+  includesVIPPack         Boolean               @default(false)
+  isDefault               Boolean               @default(false)
+  isActive                Boolean               @default(true)
+  isFree                  Boolean               @default(false)
+  createdAt               DateTime              @default(now())
+  updatedAt               DateTime              @updatedAt
+  ForumCategory           ForumCategory[]
+  SubscriptionHistory     SubscriptionHistory[]
+  User                    User[]
+  Video                   Video[]
+}
+
+model Tag {
+  id           String         @id @default(cuid())
+  slug         String         @unique
+  name         String
+  ProductTag        ProductTag[]
+  VideoTag          VideoTag[]
+  PerformerTag      PerformerTag[]
+  PerformerPhotoTag PerformerPhotoTag[]
+}
+
+model PerformerTag {
+  performerId String
+  tagId       String
+  performer   Performer @relation(fields: [performerId], references: [id], onDelete: Cascade)
+  tag         Tag       @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([performerId, tagId])
+}
+
+model NewsletterSubscriber {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  source       String? // "footer" | "blog" | otros
+  isActive     Boolean   @default(true)
+  confirmedAt  DateTime?
+  unsubscribedAt DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([isActive])
+}
+
+model User {
+  id                                           String                   @id @default(cuid())
+  email                                        String                   @unique
+  password                                     String
+  name                                         String?
+  username                                     String?                  @unique
+  image                                        String?
+  emailVerified                                DateTime?
+  subscriptionPlanId                           String?
+  subscriptionStart                            DateTime?
+  subscriptionEnd                              DateTime?
+  ccbillSubscriptionId                         String?
+  epochMemberId                                String?
+  easierpaySubscriptionId                      String?
+  bio                                          String?
+  forumSignature                               String?
+  relationshipStatus                           RelationshipStatus?
+  relationshipRole                             RelationshipRole?
+  isAdmin                                      Boolean                  @default(false)
+  adminRole                                    AdminRole?
+  isPerformer                                  Boolean                  @default(false)
+  isVerified                                   Boolean                  @default(false)
+  isModerator                                  Boolean                  @default(false)
+  ageVerified                                  Boolean                  @default(false)
+  ageVerifiedAt                                DateTime?
+  notifyEmail                                  Boolean                  @default(true)
+  notifyNewContent                             Boolean                  @default(true)
+  notifySubscription                           Boolean                  @default(false)
+  notifyMarketing                              Boolean                  @default(false)
+  joinedAt                                     DateTime                 @default(now())
+  isFounder                                    Boolean                  @default(false)
+  createdAt                                    DateTime                 @default(now())
+  updatedAt                                    DateTime                 @updatedAt
+  ReferralConversion                           ReferralConversion[]
+  BlogPost                                     BlogPost[]
+  Cart                                         Cart?
+  Comment                                      Comment[]
+  DirectMessage_DirectMessage_receiverIdToUser DirectMessage[]          @relation("DirectMessage_receiverIdToUser")
+  DirectMessage_DirectMessage_senderIdToUser   DirectMessage[]          @relation("DirectMessage_senderIdToUser")
+  favorites                                    Favorite[]
+  ForumPost                                    ForumPost[]
+  ForumReply                                   ForumReply[]
+  ForumLike                                    ForumLike[]
+  ForumPollVote                                ForumPollVote[]
+  Order                                        Order[]
+  Performer                                    Performer?
+  Session                                      Session[]
+  SubscriptionHistory                          SubscriptionHistory[]
+  SubscriptionPlan                             SubscriptionPlan?        @relation(fields: [subscriptionPlanId], references: [id])
+  UserBadge                                    UserBadge[]
+  WatchHistory                                 WatchHistory[]
+  EmailVerificationToken                       EmailVerificationToken[]
+  PasswordResetToken                           PasswordResetToken[]
+  PerformerNotify                              PerformerNotify[]
+  ContentReport                                ContentReport[]
+}
+
+model UserBadge {
+  userId    String
+  badgeId   String
+  awardedAt DateTime @default(now())
+  Badge     Badge    @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, badgeId])
+}
+
+model Video {
+  id                 String              @id @default(cuid())
+  slug               String              @unique
+  title              String
+  description        String?
+  muxAssetId         String?             @unique
+  muxPlaybackId      String?
+  muxUploadId        String?
+  thumbnailUrl       String
+  previewUrl         String?
+  duration           Int                 @default(0)
+  releaseDate        DateTime            @default(now())
+  publishedAt        DateTime?
+  isLimitedEdition   Boolean             @default(false)
+  limitedAccessUntil DateTime?
+  isDiamondExclusive Boolean             @default(false)
+  minTierPlanId      String?
+  viewCount          Int                 @default(0)
+  likeCount          Int                 @default(0)
+  metaTitle          String?
+  metaDescription    String?
+  status             VideoStatus         @default(DRAFT)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  previewEndTime     Float               @default(5)
+  previewFps         Int                 @default(15)
+  previewStartTime   Float               @default(0)
+  previewWidth       Int                 @default(640)
+  comments           Comment[]
+  favorites          Favorite[]
+  minTierPlan        SubscriptionPlan?   @relation(fields: [minTierPlanId], references: [id])
+  gallery            VideoGalleryImage[]
+  performers         VideoPerformer[]
+  relatedProducts    VideoProduct[]
+  subtitles          VideoSubtitle[]
+  tags               VideoTag[]
+  categories         VideoToCategory[]
+  watchHistory       WatchHistory[]
+}
+
+model VideoCategory {
+  id                  String            @id @default(cuid())
+  slug                String            @unique
+  name                String
+  description         String?
+  imageUrl            String?
+  order               Int               @default(0)
+  parentId            String?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+  VideoCategory       VideoCategory?    @relation("VideoCategoryToVideoCategory", fields: [parentId], references: [id])
+  other_VideoCategory VideoCategory[]   @relation("VideoCategoryToVideoCategory")
+  VideoToCategory     VideoToCategory[]
+}
+
+model VideoGalleryImage {
+  id      String @id @default(cuid())
+  videoId String
+  url     String
+  order   Int    @default(0)
+  video   Video  @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@index([videoId])
+}
+
+model VideoPerformer {
+  videoId     String
+  performerId String
+  performer   Performer @relation(fields: [performerId], references: [id], onDelete: Cascade)
+  video       Video     @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@id([videoId, performerId])
+}
+
+model ProductPerformer {
+  productId   String
+  performerId String
+  product     Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  performer   Performer @relation(fields: [performerId], references: [id], onDelete: Cascade)
+
+  @@id([productId, performerId])
+}
+
+model VideoProduct {
+  videoId   String
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  video     Video   @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@id([videoId, productId])
+}
+
+model VideoSubtitle {
+  id       String @id @default(cuid())
+  videoId  String
+  language String
+  label    String
+  srtUrl   String
+  video    Video  @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@unique([videoId, language])
+}
+
+model VideoTag {
+  videoId String
+  tagId   String
+  tag     Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  video   Video  @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@id([videoId, tagId])
+}
+
+model VideoToCategory {
+  videoId    String
+  categoryId String
+  category   VideoCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  video      Video         @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@id([videoId, categoryId])
+}
+
+model WatchHistory {
+  id             String   @id @default(cuid())
+  userId         String
+  videoId        String
+  watchedSeconds Int      @default(0)
+  completed      Boolean  @default(false)
+  lastWatchedAt  DateTime @default(now())
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  video          Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, videoId])
+}
+
+enum BadgeType {
+  SUBSCRIPTION
+  TENURE
+  ACHIEVEMENT
+  ROLE
+  COMMUNITY
+}
+
+enum BlogPostType {
+  ARTICLE
+  ANNOUNCEMENT
+  NEWS
+}
+
+enum BlogStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum CastingStatus {
+  PENDING
+  REVIEWING
+  ACCEPTED
+  REJECTED
+}
+
+enum ReferralConversionType {
+  SUBSCRIPTION
+  SHOP_PURCHASE
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED_AMOUNT
+  FREE_TRIAL_DAYS
+}
+
+enum HomeSectionType {
+  HERO
+  VIDEO_GRID
+  ACTRESS_GRID
+  CTA_BANNER
+  COUNTDOWN
+  CATEGORY_FEATURED
+}
+
+enum ShopSectionType {
+  HERO
+  TRUST_ICONS
+  FEATURED_COLLECTIONS
+  PRODUCTS_GRID
+  REVIEWS
+  FAQ
+  CTA_BANNER
+  VIDEO_GRID
+  PAGE
+  MODEL_PICKS
+  PRODUCT_VIDEOS
+}
+
+enum OrderStatus {
+  PENDING
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+  ARCHIVED
+}
+
+enum AdminNotificationType {
+  NEW_ORDER
+  ORDER_PAID
+  PAYMENT_FAILED
+  NEW_USER
+  NEW_CONTACT_MESSAGE
+  NEW_CASTING
+  NEW_SUBSCRIPTION
+  SUBSCRIPTION_CANCELLED
+  SUBSCRIPTION_RENEWAL_REMINDER
+  SUBSCRIPTION_EXPIRED
+  NEW_FORUM_POST
+  LOW_STOCK
+  SYSTEM
+}
+
+model AdminNotification {
+  id         String                @id @default(cuid())
+  type       AdminNotificationType
+  title      String
+  message    String?
+  relatedUrl String?
+  read       Boolean               @default(false)
+  createdAt  DateTime              @default(now())
+
+  @@index([read, createdAt])
+  @@index([createdAt])
+}
+
+enum PageStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+  CHARGEBACK
+}
+
+enum ProductRiskLevel {
+  LOW_RISK
+  HIGH_RISK
+}
+
+enum ProductStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+enum PromoApplicableTo {
+  SUBSCRIPTION
+  SHOP
+  ALL
+}
+
+enum RelationshipRole {
+  BULL
+  VOYEUR
+  CUCKOLD
+  STAG
+  HOTWIFE
+  OTHER
+}
+
+enum RelationshipStatus {
+  SINGLE
+  MARRIED
+  IN_RELATIONSHIP
+}
+
+enum VideoStatus {
+  DRAFT
+  SCHEDULED
+  PUBLISHED
+  ARCHIVED
+}
+
+enum VideoSourceType {
+  MANUAL
+  CATEGORY
+  LATEST
+  POPULAR
+  SYSTEM_COLLECTION
+}
+
+enum SystemCollectionType {
+  MAS_VISTOS
+  NUEVOS
+  TENDENCIAS
+  MEJOR_VALORADOS
+  MAS_COMENTADOS
+  RECOMENDADOS
+}
+
+enum AdminRole {
+  GLOBAL_ADMIN
+  CONTENT_EDITOR
+  ECOMMERCE_MANAGER
+  FINANCE_MANAGER
+  COMMUNITY_MODERATOR
+}
+
+enum AttributeType {
+  SELECT
+  COLOR
+  IMAGE
+}
+
+enum ProductType {
+  SIMPLE
+  VARIABLE
+}
+
+enum ReportItemType {
+  FORUM_POST
+  FORUM_REPLY
+  VIDEO_COMMENT
+}
+
+enum ReportReason {
+  SPAM
+  HARASSMENT
+  INAPPROPRIATE
+  MISINFORMATION
+  OTHER
+}
+
+enum ReportStatus {
+  PENDING
+  REVIEWING
+  RESOLVED
+  DISMISSED
+}
+
+model ContentReport {
+  id         String         @id @default(cuid())
+  reporterId String
+  itemType   ReportItemType
+  itemId     String
+  reason     ReportReason
+  message    String?
+  status     ReportStatus   @default(PENDING)
+  adminNotes String?
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+  reporter   User           @relation(fields: [reporterId], references: [id], onDelete: Cascade)
+
+  @@index([reporterId])
+  @@index([itemType, itemId])
+  @@index([status])
+}
+
+// ============================================
+// SISTEMA DE ATRIBUTOS Y VARIANTES
+// ============================================
+
+model Attribute {
+  id        String             @id @default(cuid())
+  slug      String             @unique
+  name      String
+  type      AttributeType      @default(SELECT)
+  order     Int                @default(0)
+  isActive  Boolean            @default(true)
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+  values    AttributeValue[]
+  products  ProductAttribute[]
+}
+
+model AttributeValue {
+  id          String                  @id @default(cuid())
+  attributeId String
+  slug        String
+  value       String
+  colorHex    String?
+  imageUrl    String?
+  order       Int                     @default(0)
+  isActive    Boolean                 @default(true)
+  createdAt   DateTime                @default(now())
+  attribute   Attribute               @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+  variants    VariantAttributeValue[]
+
+  @@unique([attributeId, slug])
+  @@index([attributeId])
+}
+
+model ProductAttribute {
+  id          String    @id @default(cuid())
+  productId   String
+  attributeId String
+  order       Int       @default(0)
+  product     Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  attribute   Attribute @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, attributeId])
+  @@index([productId])
+}
+
+model ProductVariant {
+  id              String                  @id @default(cuid())
+  productId       String
+  sku             String?                 @unique
+  price           Decimal                 @db.Decimal(10, 2)
+  compareAtPrice  Decimal?                @db.Decimal(10, 2)
+  stock           Int                     @default(0)
+  imageUrl        String?
+  weight          Decimal?                @db.Decimal(10, 3)
+  isActive        Boolean                 @default(true)
+  createdAt       DateTime                @default(now())
+  updatedAt       DateTime                @updatedAt
+  product         Product                 @relation(fields: [productId], references: [id], onDelete: Cascade)
+  attributeValues VariantAttributeValue[]
+  cartItems       CartItem[]
+  orderItems      OrderItem[]
+
+  @@index([productId])
+}
+
+model VariantAttributeValue {
+  id               String         @id @default(cuid())
+  variantId        String
+  attributeValueId String
+  variant          ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  attributeValue   AttributeValue @relation(fields: [attributeValueId], references: [id], onDelete: Cascade)
+
+  @@unique([variantId, attributeValueId])
+  @@index([variantId])
+  @@index([attributeValueId])
+}
+
+// ============================================
+// SISTEMA DE ENVÍO
+// ============================================
+
+model ShippingZone {
+  id          String         @id @default(cuid())
+  name        String
+  description String?
+  countries   String[]
+  postalCodes String[]
+  isActive    Boolean        @default(true)
+  order       Int            @default(0)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  rates       ShippingRate[]
+}
+
+model ShippingRate {
+  id                 String       @id @default(cuid())
+  zoneId             String
+  name               String
+  description        String?
+  price              Decimal      @db.Decimal(10, 2)
+  minOrderAmount     Decimal?     @db.Decimal(10, 2)
+  freeShippingAmount Decimal?     @db.Decimal(10, 2)
+  minWeight          Decimal?     @db.Decimal(10, 3)
+  maxWeight          Decimal?     @db.Decimal(10, 3)
+  estimatedDays      Int?
+  isActive           Boolean      @default(true)
+  order              Int          @default(0)
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+  zone               ShippingZone @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+
+  @@index([zoneId])
+}
+
+model ShippingSettings {
+  id                      String   @id @default(cuid())
+  freeShippingEnabled     Boolean  @default(false)
+  freeShippingThreshold   Decimal? @db.Decimal(10, 2)
+  defaultWeight           Decimal  @default(0.5) @db.Decimal(10, 3)
+  enableWeightCalculation Boolean  @default(false)
+  fallbackZoneId          String?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+}
+
+// ============================================
+// SISTEMA DE EMAIL
+// ============================================
+
+model EmailVerificationToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model EmailLog {
+  id        String   @id @default(cuid())
+  to        String
+  subject   String
+  template  String
+  status    String // sent, failed, bounced
+  resendId  String?
+  error     String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([to])
+  @@index([template])
+}
+
+model SearchTrend {
+  id        String   @id @default(cuid())
+  query     String   @unique
+  count     Int      @default(1)
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  @@index([count(sort: Desc)])
+}
+
+// ============================================
+// CONTACT MESSAGES
+// ============================================
+
+model ContactMessage {
+  id        String    @id @default(cuid())
+  name      String
+  email     String
+  subject   String
+  message   String
+  status    String    @default("UNREAD") // UNREAD, READ, REPLIED, ARCHIVED
+  repliedAt DateTime?
+  ipAddress String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([status])
+  @@index([createdAt(sort: Desc)])
+}
+
+// ============================================
+// COLECCIONES DEL SISTEMA
+// ============================================
+
+model SystemCollection {
+  id          String               @id @default(cuid())
+  type        SystemCollectionType @unique
+  slug        String               @unique
+  name        String
+  description String?
+  imageUrl    String?
+  isEnabled   Boolean              @default(true)
+  order       Int                  @default(0)
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+}

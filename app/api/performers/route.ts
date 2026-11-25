@@ -1,0 +1,200 @@
+import { NextRequest, NextResponse } from "next/server"
+import { prisma } from "@/lib/prisma"
+import { auth } from "@/auth"
+import { releaseDuePerformers } from "@/lib/performer-release"
+import { isPerformerNew, isPerformerScheduled } from "@/lib/performer-status"
+
+// POST - Crear performer (admin only)
+export async function POST(request: NextRequest) {
+  try {
+    const session = await auth()
+
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: "Not authorized" }, { status: 401 })
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: session.user.id },
+      select: { isAdmin: true },
+    })
+
+    if (!user?.isAdmin) {
+      return NextResponse.json({ error: "Not authorized" }, { status: 403 })
+    }
+
+    const body = await request.json()
+    const {
+      name,
+      slug,
+      bio,
+      profileImage,
+      coverImage,
+      location,
+      verified,
+      comingSoon,
+      comingSoonDate,
+      tagIds,
+    } = body
+
+    // Verificar slug único
+    const existingPerformer = await prisma.performer.findUnique({
+      where: { slug },
+    })
+
+    if (existingPerformer) {
+      return NextResponse.json(
+        { error: "A performer with that slug already exists" },
+        { status: 400 }
+      )
+    }
+
+    const isComingSoon = Boolean(comingSoon)
+    const parsedComingSoonDate = comingSoonDate ? new Date(comingSoonDate) : null
+    const now = new Date()
+
+    const performer = await prisma.performer.create({
+      data: {
+        name,
+        slug,
+        bio,
+        profileImage: profileImage || null,
+        coverImage: coverImage || null,
+        location: location || null,
+        verified: verified ?? false,
+        comingSoon: isComingSoon,
+        comingSoonDate: parsedComingSoonDate,
+        releasedAt: isComingSoon ? null : now,
+        PerformerTag: tagIds?.length
+          ? {
+              create: tagIds.map((tagId: string) => ({
+                tag: { connect: { id: tagId } },
+              })),
+            }
+          : undefined,
+      },
+    })
+
+    return NextResponse.json(performer, { status: 201 })
+  } catch (error) {
+    console.error("Error creating performer:", error)
+    return NextResponse.json(
+      { error: "Error creating performer" },
+      { status: 500 }
+    )
+  }
+}
+
+export async function GET(request: NextRequest) {
+  try {
+    await releaseDuePerformers()
+    const nowMs = Date.now()
+    const { searchParams } = new URL(request.url)
+
+    // Parámetros de paginación
+    const page = parseInt(searchParams.get("page") || "1")
+    const limit = parseInt(searchParams.get("limit") || "12")
+    const skip = (page - 1) * limit
+
+    // Filtros
+    const search = searchParams.get("search")
+    const sortBy = searchParams.get("sort") || "name"
+    const sortOrder = searchParams.get("order") || "asc"
+
+    // Construir query
+    const where: Record<string, unknown> = {}
+
+    // Búsqueda por nombre
+    if (search) {
+      where.OR = [
+        { name: { contains: search, mode: "insensitive" } },
+        { bio: { contains: search, mode: "insensitive" } },
+      ]
+    }
+
+    // Ordenación
+    const orderBy: Record<string, string> = {}
+    if (sortBy === "name") {
+      orderBy.name = sortOrder
+    } else if (sortBy === "videos") {
+      orderBy.videoCount = sortOrder
+    } else if (sortBy === "newest") {
+      orderBy.createdAt = sortOrder
+    }
+
+    // Ejecutar query
+    const [performers, total] = await Promise.all([
+      prisma.performer.findMany({
+        where,
+        orderBy,
+        skip,
+        take: limit,
+        select: {
+          id: true,
+          slug: true,
+          name: true,
+          bio: true,
+          profileImage: true,
+          coverImage: true,
+          location: true,
+          videoCount: true,
+          comingSoon: true,
+          comingSoonDate: true,
+          releasedAt: true,
+        },
+      }),
+      prisma.performer.count({ where }),
+    ])
+
+    const formattedPerformers = performers.map((p) => {
+      const scheduled = isPerformerScheduled(p, nowMs)
+      return {
+        ...p,
+        bio: scheduled ? null : p.bio,
+        location: scheduled ? null : p.location,
+        comingSoon: scheduled,
+        comingSoonDate: p.comingSoonDate?.toISOString() ?? null,
+        releasedAt: p.releasedAt?.toISOString() ?? null,
+        isNew: isPerformerNew(p, nowMs),
+      }
+    })
+
+    return NextResponse.json({
+      performers: formattedPerformers,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    })
+  } catch (error) {
+    console.error("Error fetching performers:", error)
+    return NextResponse.json(
+      { error: "Error fetching performers" },
+      { status: 500 }
+    )
+  }
+}
+
+// GET filtros disponibles
+export async function OPTIONS() {
+  try {
+    const locations = await prisma.performer.findMany({
+      where: { location: { not: null } },
+      select: { location: true },
+      distinct: ["location"],
+    })
+
+    return NextResponse.json({
+      filters: {
+        locations: locations.map((p) => p.location).filter(Boolean),
+      },
+    })
+  } catch (error) {
+    console.error("Error fetching filters:", error)
+    return NextResponse.json(
+      { error: "Error fetching filters" },
+      { status: 500 }
+    )
+  }
+}

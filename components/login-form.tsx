@@ -1,0 +1,152 @@
+"use client"
+
+import { useState } from "react"
+import { useRouter } from "next/navigation"
+import { signIn, getSession } from "next-auth/react"
+import { cn } from "@/lib/utils"
+import { Button } from "@/components/ui/button"
+import {
+  Field,
+  FieldDescription,
+  FieldGroup,
+  FieldLabel,
+  FieldError,
+} from "@/components/ui/field"
+import { Input } from "@/components/ui/input"
+
+interface LoginFormProps extends React.ComponentProps<"form"> {
+  showRegisterLink?: boolean
+  showForgotPassword?: boolean
+}
+
+export function LoginForm({
+  className,
+  showRegisterLink = true,
+  showForgotPassword = true,
+  ...props
+}: LoginFormProps) {
+  const router = useRouter()
+  const [error, setError] = useState<string | null>(null)
+  const [isLoading, setIsLoading] = useState(false)
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setIsLoading(true)
+    setError(null)
+
+    const formData = new FormData(event.currentTarget)
+    const email = formData.get("email") as string
+    const password = formData.get("password") as string
+
+    try {
+      const result = await signIn("credentials", {
+        email,
+        password,
+        redirect: false,
+      })
+
+      if (result?.error) {
+        if (result.error === "MissingCSRF" || result.error === "Configuration") {
+          setError(
+            "Cookies are blocked in this embedded preview. Enable third-party cookies or open the app in a new tab to log in."
+          )
+        } else {
+          setError("Incorrect email or password")
+        }
+        setIsLoading(false)
+        return
+      }
+
+      // Get session to check if user is admin
+      const session = await getSession()
+
+      if (!session?.user) {
+        setError(
+          "Login succeeded, but your browser blocked saving the session cookie in this embedded frame. Open the app in a new tab to access admin."
+        )
+        setIsLoading(false)
+        return
+      }
+
+      if (session.user.isAdmin) {
+        router.push("/admin")
+      } else {
+        router.push("/")
+      }
+      router.refresh()
+    } catch {
+      setError("Error logging in")
+      setIsLoading(false)
+    }
+  }
+
+  return (
+    <form
+      className={cn("flex flex-col gap-6", className)}
+      onSubmit={handleSubmit}
+      {...props}
+    >
+      <FieldGroup>
+        <div className="flex flex-col items-center gap-1 text-center">
+          <h1 className="text-2xl font-bold">Log in to your account</h1>
+          <p className="text-muted-foreground text-sm text-balance">
+            Enter your email and password to continue
+          </p>
+        </div>
+
+        {error && (
+          <FieldError>{error}</FieldError>
+        )}
+
+        <Field>
+          <FieldLabel htmlFor="email">Email</FieldLabel>
+          <Input
+            id="email"
+            name="email"
+            type="email"
+            placeholder="you@email.com"
+            required
+            disabled={isLoading}
+            className="text-white placeholder:text-white/70"
+          />
+        </Field>
+
+        <Field>
+          <div className="flex items-center">
+            <FieldLabel htmlFor="password">Password</FieldLabel>
+            {showForgotPassword && (
+              <a
+                href="#"
+                className="ml-auto text-sm underline-offset-4 hover:underline"
+              >
+                Forgot your password?
+              </a>
+            )}
+          </div>
+          <Input
+            id="password"
+            name="password"
+            type="password"
+            required
+            disabled={isLoading}
+            className="text-white placeholder:text-white/70"
+          />
+        </Field>
+
+        <Field>
+          <Button type="submit" disabled={isLoading}>
+            {isLoading ? "Logging in..." : "Log In"}
+          </Button>
+          {showRegisterLink && (
+            <FieldDescription className="text-center">
+              Don&apos;t have an account?{" "}
+              <a href="/?register=true" className="underline underline-offset-4 text-white hover:text-white">
+                Sign Up
+              </a>
+            </FieldDescription>
+          )}
+        </Field>
+      </FieldGroup>
+    </form>
+  )
+}
