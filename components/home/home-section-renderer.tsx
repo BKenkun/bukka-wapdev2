@@ -7,9 +7,16 @@ import { VideoCarousel } from "@/components/video-carousel"
 import { CtaBanner } from "@/components/cta-banner"
 import { ActressesCarousel } from "@/components/actresses-carousel"
 import { CountdownTimer } from "@/components/countdown-timer"
-import { getVideoToken, getVideoPreviewUrl } from "@/lib/mux/client"
+import { getVideoToken, getVideoPreviewUrl, isMuxSigningConfigured } from "@/lib/mux/client"
 import { releaseDuePerformers } from "@/lib/performer-release"
 import { isPerformerNew, isPerformerScheduled } from "@/lib/performer-status"
+import { releaseDueVideos } from "@/lib/video-release"
+import {
+  getPublicVideoPoolWhere,
+  getUpcomingWindowVideosWhere,
+  isVideoNew,
+  isVideoScheduled,
+} from "@/lib/video-status"
 import { resolveUpcomingScene, type CountdownSectionConfig } from "@/lib/upcoming-scene"
 import type { BannerContentPosition } from "@/lib/banner-utils"
 
@@ -100,12 +107,19 @@ interface VideoData {
   category?: string
   performers?: Performer[]
   publishedAt?: Date | string
+  comingSoon?: boolean
+  releaseDate?: string | null
+  isNew?: boolean
 }
 
 async function getVideosForSection(config: VideoGridConfig): Promise<VideoData[]> {
   const limit = config.limit || 6
 
   try {
+    await releaseDueVideos()
+    const now = new Date()
+    const nowMs = now.getTime()
+
     let videos: Array<{
       id: string
       slug: string
@@ -117,6 +131,8 @@ async function getVideosForSection(config: VideoGridConfig): Promise<VideoData[]
       muxPlaybackId: string | null
       viewCount: number
       likeCount: number
+      status: string
+      publishedAt: Date | null
       releaseDate: Date | null
       performers: Array<{ performer: { name: string; slug: string } }>
       categories: Array<{ category: { name: string } }>
@@ -133,14 +149,15 @@ async function getVideosForSection(config: VideoGridConfig): Promise<VideoData[]
       muxPlaybackId: true,
       viewCount: true,
       likeCount: true,
+      status: true,
+      publishedAt: true,
       releaseDate: true,
       performers: { include: { performer: { select: { name: true, slug: true } } } },
       categories: { include: { category: { select: { name: true } } }, take: 1 },
     }
 
     // Calculate date for weekly filtering
-    const oneWeekAgo = new Date()
-    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7)
+    const oneWeekAgo = new Date(nowMs - 7 * 24 * 60 * 60 * 1000)
 
     switch (config.source) {
       case "popular":
@@ -218,14 +235,14 @@ async function getVideosForSection(config: VideoGridConfig): Promise<VideoData[]
         if (config.categorySlug) {
           videos = await prisma.video.findMany({
             where: {
-              status: "PUBLISHED",
+              AND: [getPublicVideoPoolWhere(now)],
               categories: {
                 some: {
                   category: { slug: config.categorySlug },
                 },
               },
             },
-            orderBy: { publishedAt: "desc" },
+            orderBy: { releaseDate: "desc" },
             take: limit,
             select: videoSelect,
           })
@@ -238,14 +255,14 @@ async function getVideosForSection(config: VideoGridConfig): Promise<VideoData[]
         if (config.tagSlug) {
           videos = await prisma.video.findMany({
             where: {
-              status: "PUBLISHED",
+              AND: [getPublicVideoPoolWhere(now)],
               tags: {
                 some: {
                   tag: { slug: config.tagSlug },
                 },
               },
             },
-            orderBy: { publishedAt: "desc" },
+            orderBy: { releaseDate: "desc" },
             take: limit,
             select: videoSelect,
           })
@@ -259,7 +276,7 @@ async function getVideosForSection(config: VideoGridConfig): Promise<VideoData[]
           const fetchedVideos = await prisma.video.findMany({
             where: {
               id: { in: config.videoIds },
-              status: "PUBLISHED",
+              status: { in: ["PUBLISHED", "SCHEDULED"] },
             },
             select: videoSelect,
           })
@@ -273,30 +290,48 @@ async function getVideosForSection(config: VideoGridConfig): Promise<VideoData[]
         break
 
       case "latest":
-      default:
-        videos = await prisma.video.findMany({
-          where: { status: "PUBLISHED" },
-          orderBy: { publishedAt: "desc" },
+      default: {
+        // Show upcoming scenes dropping within the next 10 days (soonest first), followed by latest published
+        const upcomingVideos = await prisma.video.findMany({
+          where: getUpcomingWindowVideosWhere(now),
+          orderBy: { releaseDate: "asc" },
           take: limit,
           select: videoSelect,
         })
+        const remaining = Math.max(0, limit - upcomingVideos.length)
+        const publishedVideos =
+          remaining > 0
+            ? await prisma.video.findMany({
+                where: { status: "PUBLISHED" },
+                orderBy: [{ publishedAt: "desc" }, { releaseDate: "desc" }],
+                take: remaining,
+                select: videoSelect,
+              })
+            : []
+        videos = [...upcomingVideos, ...publishedVideos]
         break
+      }
     }
 
-    // Transform to VideoGrid format with signed preview URLs
+    // Transform to VideoGrid format with signed preview URLs (skip previews for scheduled videos)
     return Promise.all(
       videos.map(async (video) => {
-        // Use custom previewUrl if available, otherwise use signed Mux MP4
-        let videoPreviewUrl = video.previewUrl || undefined
+        const scheduled = isVideoScheduled(video, nowMs)
+        let videoPreviewUrl: string | undefined = undefined
 
-        if (!videoPreviewUrl && video.muxPlaybackId) {
-          try {
-            // Generate signed token for Mux MP4 preview
-            const token = await getVideoToken(video.muxPlaybackId)
-            videoPreviewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "medium")
-          } catch (error) {
-            console.warn(`Failed to generate preview token for video ${video.id}:`, error)
-            // Fallback: leave previewUrl undefined
+        if (!scheduled) {
+          // Use custom previewUrl if available, otherwise use signed Mux MP4
+          videoPreviewUrl = video.previewUrl || undefined
+
+          if (!videoPreviewUrl && video.muxPlaybackId && isMuxSigningConfigured()) {
+            try {
+              // Generate signed token for Mux MP4 preview
+              const token = await getVideoToken(video.muxPlaybackId)
+              videoPreviewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "medium")
+            } catch (error) {
+              console.warn(`Failed to generate preview token for video ${video.id}:`, error)
+              // Fallback: leave previewUrl undefined
+            }
           }
         }
 
@@ -313,6 +348,9 @@ async function getVideosForSection(config: VideoGridConfig): Promise<VideoData[]
           category: video.categories[0]?.category.name,
           performers: video.performers.map((p) => ({ name: p.performer.name, slug: p.performer.slug })),
           publishedAt: video.releaseDate || undefined,
+          comingSoon: scheduled,
+          releaseDate: video.releaseDate?.toISOString() ?? null,
+          isNew: isVideoNew(video, nowMs),
         }
       })
     )
@@ -504,7 +542,7 @@ export async function HomeSectionRenderer({ section }: HomeSectionRendererProps)
 
       // Si es vídeo de la BD con Mux, generar URL firmada para reproducción
       let dbVideoUrl: string | undefined
-      if (ctaConfig.bgSource === "dbVideo" && ctaConfig.dbVideoMuxPlaybackId) {
+      if (ctaConfig.bgSource === "dbVideo" && ctaConfig.dbVideoMuxPlaybackId && isMuxSigningConfigured()) {
         try {
           const token = await getVideoToken(ctaConfig.dbVideoMuxPlaybackId)
           dbVideoUrl = getVideoPreviewUrl(ctaConfig.dbVideoMuxPlaybackId, token, "high")

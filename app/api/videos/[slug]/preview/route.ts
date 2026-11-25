@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { getVideoToken, getVideoPreviewUrl } from "@/lib/mux/client"
+import { releaseDueVideos } from "@/lib/video-release"
+import { isVideoScheduled } from "@/lib/video-status"
 
 interface RouteParams {
   params: Promise<{ slug: string }>
@@ -11,6 +13,7 @@ interface RouteParams {
  */
 export async function GET(request: NextRequest, { params }: RouteParams) {
   try {
+    await releaseDueVideos()
     const { slug } = await params
     const { searchParams } = new URL(request.url)
     const quality = (searchParams.get("quality") as "low" | "medium" | "high") || "medium"
@@ -18,6 +21,9 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     const video = await prisma.video.findUnique({
       where: { slug },
       select: {
+        id: true,
+        status: true,
+        releaseDate: true,
         muxPlaybackId: true,
         previewStartTime: true,
         previewEndTime: true,
@@ -28,6 +34,32 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       return NextResponse.json(
         { error: "Video not found" },
         { status: 404 }
+      )
+    }
+
+    const nowMs = Date.now()
+    let effectiveStatus = video.status
+    if (effectiveStatus === "SCHEDULED" && video.releaseDate && video.releaseDate.getTime() <= nowMs) {
+      await releaseDueVideos({ force: true })
+      const refreshed = await prisma.video.findUnique({
+        where: { id: video.id },
+        select: { status: true },
+      })
+      if (refreshed) effectiveStatus = refreshed.status
+    }
+
+    if (effectiveStatus === "DRAFT" || effectiveStatus === "ARCHIVED") {
+      return NextResponse.json({ error: "Video not found" }, { status: 404 })
+    }
+
+    if (isVideoScheduled({ status: effectiveStatus, releaseDate: video.releaseDate }, nowMs)) {
+      return NextResponse.json(
+        {
+          error: "This video is scheduled and not available yet",
+          reason: "SCHEDULED",
+          availableAt: video.releaseDate,
+        },
+        { status: 403 }
       )
     }
 

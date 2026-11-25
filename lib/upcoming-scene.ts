@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma"
-import { getVideoToken, getVideoPreviewUrl } from "@/lib/mux/client"
+import { getVideoToken, getVideoPreviewUrl, isMuxSigningConfigured } from "@/lib/mux/client"
 import { releaseDueVideos } from "@/lib/video-release"
 import {
   BannerContentPosition,
@@ -107,6 +107,8 @@ export interface ResolvedUpcomingScene {
   manualStateCAction: ManualStateCAction
   /** True when hitting 0 should ping /api/videos/release */
   triggerVideoReleaseOnEnd: boolean
+  /** Deterministic server timestamp (ms) used to hydrate initial countdown without SSR mismatch */
+  serverNowMs: number
 }
 
 const VIDEO_SELECT = {
@@ -176,7 +178,7 @@ async function resolveVideoBackground(
 
   let resolvedVideoUrl: string | undefined = video.previewUrl?.trim() || undefined
 
-  if (!resolvedVideoUrl && video.muxPlaybackId) {
+  if (!resolvedVideoUrl && video.muxPlaybackId && isMuxSigningConfigured()) {
     try {
       const token = await getVideoToken(video.muxPlaybackId)
       resolvedVideoUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "high")
@@ -283,6 +285,7 @@ async function buildAutoResolutionFromVideo(
     stateBEndsAtIso,
     manualStateCAction: "auto",
     triggerVideoReleaseOnEnd: true,
+    serverNowMs: nowMs,
   }
 }
 
@@ -382,6 +385,7 @@ async function resolveAutoUpcomingScene(
     stateBEndsAtIso: null,
     manualStateCAction: "auto",
     triggerVideoReleaseOnEnd: false,
+    serverNowMs: nowMs,
   }
 }
 
@@ -497,5 +501,6 @@ export async function resolveUpcomingScene(
     stateBEndsAtIso,
     manualStateCAction,
     triggerVideoReleaseOnEnd: false,
+    serverNowMs: nowMs,
   }
 }

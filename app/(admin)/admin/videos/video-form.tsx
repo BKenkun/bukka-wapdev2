@@ -1310,7 +1310,7 @@ export function VideoForm({ video, performers, categories, products, subscriptio
                   {...register("releaseDate")}
                 />
                 <p className="text-xs text-muted-foreground">
-                  Se utiliza para el contador de Upcoming Scene y estrenos programados.
+                  Los vídeos programados aparecen en la web como &ldquo;Coming Soon&rdquo; cuando faltan 10 días o menos y se publican automáticamente al llegar a esta fecha y hora.
                 </p>
               </div>
             </CardContent>

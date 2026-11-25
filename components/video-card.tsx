@@ -2,9 +2,10 @@
 
 import { useRouter } from "next/navigation"
 import { Eye, Lock, Calendar } from "lucide-react"
-import { useState, useRef } from "react"
+import { useEffect, useState, useRef } from "react"
 import { useSubscription } from "@/hooks/use-subscription"
 import { useAuthModal } from "@/components/auth/auth-modal-provider"
+import { VideoComingSoonCard } from "@/components/video-coming-soon-card"
 
 // Play icon SVG component
 function PlayIcon({ className }: { className?: string }) {
@@ -54,6 +55,9 @@ interface VideoCardProps {
   category?: string
   performers?: Performer[]
   publishedAt?: Date | string
+  comingSoon?: boolean
+  releaseDate?: string | null
+  isNew?: boolean
 }
 
 export function VideoCard({
@@ -72,15 +76,49 @@ export function VideoCard({
   category,
   performers = [],
   publishedAt,
+  comingSoon = false,
+  releaseDate,
+  isNew = false,
 }: VideoCardProps) {
   const router = useRouter()
   const [isHovering, setIsHovering] = useState(false)
   const [showTrailerLimit, setShowTrailerLimit] = useState(false)
+  const [liveUnlocked, setLiveUnlocked] = useState(false)
   const videoRef = useRef<HTMLVideoElement>(null)
   const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const { canViewTrailer, trackTrailerView, isAuthenticated } = useSubscription()
   const { openAuthModal } = useAuthModal()
 
+  useEffect(() => {
+    setLiveUnlocked(false)
+  }, [comingSoon, releaseDate])
+
+  const handleComingSoonExpire = () => {
+    setLiveUnlocked(true)
+    fetch("/api/videos/release", { method: "POST" })
+      .catch(() => {})
+      .finally(() => {
+        router.refresh()
+      })
+  }
+
+  if (comingSoon && !liveUnlocked) {
+    return (
+      <VideoComingSoonCard
+        videoId={videoId}
+        slug={slug}
+        title={title}
+        imageUrl={imageUrl}
+        releaseDate={releaseDate}
+        category={category}
+        performers={performers}
+        variant={variant}
+        onExpire={handleComingSoonExpire}
+      />
+    )
+  }
+
+  const showNewBadge = isNew || liveUnlocked
   const effectiveVideoId = videoId || slug
 
   const handleMouseEnter = () => {
@@ -207,6 +245,14 @@ export function VideoCard({
       >
         {/* Video thumbnail / preview */}
         <div className="relative w-full aspect-[476/309] overflow-hidden mb-3 bg-black">
+          {showNewBadge && (
+            <span
+              className="absolute top-3 right-3 z-20 px-2.5 py-1 text-[10px] font-bold tracking-widest uppercase"
+              style={{ backgroundColor: "var(--brand-color, #FA4860)", color: "#FFFFFF" }}
+            >
+              NEW
+            </span>
+          )}
           {/* Trailer limit overlay */}
           {showTrailerLimit && <TrailerLimitOverlay />}
 
@@ -291,6 +337,14 @@ export function VideoCard({
     >
       {/* Video thumbnail / preview */}
       <div className="relative w-full aspect-[476/309] bg-black">
+        {showNewBadge && (
+          <span
+            className="absolute top-3 right-3 z-20 px-2.5 py-1 text-[10px] font-bold tracking-widest uppercase"
+            style={{ backgroundColor: "var(--brand-color, #FA4860)", color: "#FFFFFF" }}
+          >
+            NEW
+          </span>
+        )}
         {/* Trailer limit overlay */}
         {showTrailerLimit && <TrailerLimitOverlay />}
 

@@ -20,6 +20,9 @@ interface Video {
   category?: string
   performers?: Performer[]
   publishedAt?: Date | string
+  comingSoon?: boolean
+  releaseDate?: string | null
+  isNew?: boolean
 }
 
 interface VideoGridProps {
@@ -116,6 +119,9 @@ export function VideoGrid({ videos = defaultVideos, variant = "overlay", columns
             category={video.category}
             performers={video.performers}
             publishedAt={video.publishedAt}
+            comingSoon={video.comingSoon}
+            releaseDate={video.releaseDate}
+            isNew={video.isNew}
           />
         ))}
       </div>

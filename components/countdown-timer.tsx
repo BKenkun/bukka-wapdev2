@@ -52,15 +52,18 @@ interface CountdownTimerProps {
   buttonHoverTextColor?: string
 }
 
-function computeTimeLeft(targetIso: string | null | undefined): TimeLeft {
-  if (!targetIso) {
+function computeTimeLeft(
+  targetIso: string | null | undefined,
+  nowMs?: number
+): TimeLeft {
+  if (!targetIso || nowMs === undefined) {
     return { days: 0, hours: 0, minutes: 0, seconds: 0, totalMs: 0 }
   }
   const targetMs = new Date(targetIso).getTime()
   if (Number.isNaN(targetMs)) {
     return { days: 0, hours: 0, minutes: 0, seconds: 0, totalMs: 0 }
   }
-  const diff = targetMs - Date.now()
+  const diff = targetMs - nowMs
   if (diff <= 0) {
     return { days: 0, hours: 0, minutes: 0, seconds: 0, totalMs: 0 }
   }
@@ -100,7 +103,6 @@ export function CountdownTimer({
   // Build normalized scene descriptor whether passed `resolved` or legacy props
   const scene: ResolvedUpcomingScene = resolved ?? (() => {
     const iso = parseTargetDateToIso(targetDateProp)
-    const isFuture = iso ? new Date(iso).getTime() > Date.now() : false
     const fallbackSlide: UpcomingSceneSlide = {
       kicker: kickerProp || "UPCOMING SCENE",
       title: titleProp,
@@ -111,7 +113,7 @@ export function CountdownTimer({
     }
     return {
       mode: "manual",
-      initialPhase: isFuture ? "countdown" : "new_release",
+      initialPhase: iso ? "countdown" : "new_release",
       stateA: fallbackSlide,
       stateB: {
         ...fallbackSlide,
@@ -124,6 +126,7 @@ export function CountdownTimer({
       stateBEndsAtIso: null,
       manualStateCAction: "keep_b",
       triggerVideoReleaseOnEnd: false,
+      serverNowMs: 0,
     }
   })()
 
@@ -154,7 +157,10 @@ export function CountdownTimer({
         : null
 
   const [timeLeft, setTimeLeft] = useState<TimeLeft>(() =>
-    computeTimeLeft(activeCountdownTargetIso)
+    computeTimeLeft(
+      activeCountdownTargetIso,
+      scene.serverNowMs > 0 ? scene.serverNowMs : undefined
+    )
   )
 
   const showClock =
@@ -196,13 +202,13 @@ export function CountdownTimer({
     }
   }, [notifyVideoKey])
 
-  // Live 1-second state machine & timer
+  // Live 1-second state machine & timer (runs exclusively on client after hydration)
   useEffect(() => {
     const tick = () => {
       const nowMs = Date.now()
 
       if (phase === "countdown" && scene.targetDateIso) {
-        const next = computeTimeLeft(scene.targetDateIso)
+        const next = computeTimeLeft(scene.targetDateIso, nowMs)
         setTimeLeft(next)
 
         if (next.totalMs <= 0) {
@@ -238,7 +244,7 @@ export function CountdownTimer({
       }
 
       if (phase === "fallback" && activeSlide.targetDateIso) {
-        setTimeLeft(computeTimeLeft(activeSlide.targetDateIso))
+        setTimeLeft(computeTimeLeft(activeSlide.targetDateIso, nowMs))
       }
     }
 
@@ -384,7 +390,7 @@ export function CountdownTimer({
         className={`relative z-10 flex flex-col ${pos.justify} ${pos.items} w-full max-w-6xl mx-auto px-6 sm:px-10 py-14 sm:py-16`}
         style={{ minHeight: `${height}px` }}
       >
-        <AnimatePresence mode="wait">
+        <AnimatePresence mode="wait" initial={false}>
           <motion.div
             key={`${phase}-${activeSlide.title}`}
             initial={{ opacity: 0, y: 12 }}

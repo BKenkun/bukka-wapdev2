@@ -3,6 +3,8 @@ import { prisma } from "@/lib/prisma"
 import { auth } from "@/auth"
 import { notifyPerformerSubscribers, releaseDuePerformers } from "@/lib/performer-release"
 import { isPerformerNew, isPerformerScheduled } from "@/lib/performer-status"
+import { releaseDueVideos } from "@/lib/video-release"
+import { getPublicVideoPoolWhere, isVideoNew, isVideoScheduled } from "@/lib/video-status"
 
 interface RouteParams {
   params: Promise<{ slug: string }>
@@ -225,8 +227,9 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
 
 export async function GET(request: NextRequest, { params }: RouteParams) {
   try {
-    await releaseDuePerformers()
-    const nowMs = Date.now()
+    await Promise.all([releaseDuePerformers(), releaseDueVideos()])
+    const now = new Date()
+    const nowMs = now.getTime()
     const { slug } = await params
     const { searchParams } = new URL(request.url)
 
@@ -289,17 +292,19 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       })
     }
 
-    // Obtener videos de la performer
+    // Obtener videos de la performer (publicados + programados dentro de 10 días)
+    const performerVideoWhere = {
+      AND: [getPublicVideoPoolWhere(now)],
+      performers: {
+        some: {
+          performerId: performer.id,
+        },
+      },
+    }
+
     const [videos, totalVideos] = await Promise.all([
       prisma.video.findMany({
-        where: {
-          status: "PUBLISHED",
-          performers: {
-            some: {
-              performerId: performer.id,
-            },
-          },
-        },
+        where: performerVideoWhere,
         orderBy: { releaseDate: "desc" },
         skip: videosSkip,
         take: videosLimit,
@@ -309,6 +314,8 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
           title: true,
           thumbnailUrl: true,
           duration: true,
+          status: true,
+          publishedAt: true,
           releaseDate: true,
           viewCount: true,
           minTierPlanId: true,
@@ -317,14 +324,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
         },
       }),
       prisma.video.count({
-        where: {
-          status: "PUBLISHED",
-          performers: {
-            some: {
-              performerId: performer.id,
-            },
-          },
-        },
+        where: performerVideoWhere,
       }),
     ])
 
@@ -375,7 +375,11 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
         : null,
       products: performer.products.map((pp) => pp.product),
       videos: {
-        items: videos,
+        items: videos.map((v) => ({
+          ...v,
+          comingSoon: isVideoScheduled(v, nowMs),
+          isNew: isVideoNew(v, nowMs),
+        })),
         pagination: {
           page: videosPage,
           limit: videosLimit,

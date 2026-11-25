@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma"
+import { releaseDueVideos } from "@/lib/video-release"
 import { VideosDataTable } from "./videos-data-table"
 import { Button } from "@/components/ui/button"
 import { IconPlus } from "@tabler/icons-react"
@@ -17,6 +18,7 @@ export default async function AdminVideosPage({
 }: {
   searchParams: Promise<SearchParams>
 }) {
+  await releaseDueVideos()
   const params = await searchParams
   const page = Number(params.page) || 1
   const pageSize = Number(params.pageSize) || 20

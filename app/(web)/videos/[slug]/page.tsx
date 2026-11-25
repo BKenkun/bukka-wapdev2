@@ -10,8 +10,11 @@ import { MuxVideoPlayer } from "@/components/mux-video-player"
 import { VideoPlayer } from "@/components/video-player"
 import { getVideoAccessSettings } from "@/lib/get-video-access-settings"
 import { HomeSectionRenderer } from "@/components/home/home-section-renderer"
+import { VideoComingSoonView } from "@/components/video-coming-soon-view"
 import { VideosPageClient } from "../videos-page-client"
-import { getVideoToken, getVideoPreviewUrl } from "@/lib/mux/client"
+import { getVideoToken, getVideoPreviewUrl, isMuxSigningConfigured } from "@/lib/mux/client"
+import { releaseDueVideos } from "@/lib/video-release"
+import { getPublicVideoPoolWhere, isVideoNew, isVideoScheduled } from "@/lib/video-status"
 import {
   getSystemCollectionBySlug,
   getVideosForSystemCollection,
@@ -54,13 +57,13 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
     }
   }
 
-  // Check if it's a video
+  // Check if it's a video (only expose PUBLISHED or SCHEDULED metadata)
   const video = await prisma.video.findUnique({
     where: { slug },
-    select: { title: true, description: true },
+    select: { title: true, description: true, status: true },
   })
 
-  if (video) {
+  if (video && (video.status === "PUBLISHED" || video.status === "SCHEDULED")) {
     return {
       title: video.title,
       description: video.description || undefined,
@@ -107,6 +110,9 @@ async function CategoryPage({
     tags?: string
   }>
 }) {
+  await releaseDueVideos()
+  const now = new Date()
+  const nowMs = now.getTime()
   const search = await searchParams
 
   const page = Number(search.page) || 1
@@ -134,7 +140,7 @@ async function CategoryPage({
   }
 
   const whereClause: Record<string, unknown> = {
-    status: "PUBLISHED",
+    AND: [getPublicVideoPoolWhere(now)],
     categories: {
       some: {
         categoryId: category.id,
@@ -175,6 +181,8 @@ async function CategoryPage({
         muxPlaybackId: true,
         viewCount: true,
         likeCount: true,
+        status: true,
+        publishedAt: true,
         releaseDate: true,
         performers: {
           include: {
@@ -217,14 +225,19 @@ async function CategoryPage({
 
   const transformedVideos = await Promise.all(
     videos.map(async (video) => {
-      let videoPreviewUrl = video.previewUrl || undefined
+      const scheduled = isVideoScheduled(video, nowMs)
+      let videoPreviewUrl: string | undefined = undefined
 
-      if (!videoPreviewUrl && video.muxPlaybackId) {
-        try {
-          const token = await getVideoToken(video.muxPlaybackId)
-          videoPreviewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "medium")
-        } catch (error) {
-          console.warn(`Failed to generate preview token for video ${video.id}:`, error)
+      if (!scheduled) {
+        videoPreviewUrl = video.previewUrl || undefined
+
+        if (!videoPreviewUrl && video.muxPlaybackId && isMuxSigningConfigured()) {
+          try {
+            const token = await getVideoToken(video.muxPlaybackId)
+            videoPreviewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "medium")
+          } catch (error) {
+            console.warn(`Failed to generate preview token for video ${video.id}:`, error)
+          }
         }
       }
 
@@ -241,6 +254,9 @@ async function CategoryPage({
         category: video.categories[0]?.category.name,
         performers: video.performers.map((p) => ({ name: p.performer.name, slug: p.performer.slug })),
         publishedAt: video.releaseDate,
+        comingSoon: scheduled,
+        releaseDate: video.releaseDate?.toISOString() ?? null,
+        isNew: isVideoNew(video, nowMs),
       }
     })
   )
@@ -299,6 +315,8 @@ async function SystemCollectionPage({
     page?: string
   }>
 }) {
+  await releaseDueVideos()
+  const nowMs = Date.now()
   const search = await searchParams
   const page = Number(search.page) || 1
   const pageSize = 12
@@ -335,14 +353,19 @@ async function SystemCollectionPage({
   // Transform videos
   const transformedVideos = await Promise.all(
     videos.map(async (video) => {
-      let videoPreviewUrl = video.previewUrl || undefined
+      const scheduled = isVideoScheduled(video, nowMs)
+      let videoPreviewUrl: string | undefined = undefined
 
-      if (!videoPreviewUrl && video.muxPlaybackId) {
-        try {
-          const token = await getVideoToken(video.muxPlaybackId)
-          videoPreviewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "medium")
-        } catch (error) {
-          console.warn(`Failed to generate preview token for video ${video.id}:`, error)
+      if (!scheduled) {
+        videoPreviewUrl = video.previewUrl || undefined
+
+        if (!videoPreviewUrl && video.muxPlaybackId && isMuxSigningConfigured()) {
+          try {
+            const token = await getVideoToken(video.muxPlaybackId)
+            videoPreviewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "medium")
+          } catch (error) {
+            console.warn(`Failed to generate preview token for video ${video.id}:`, error)
+          }
         }
       }
 
@@ -359,6 +382,9 @@ async function SystemCollectionPage({
         category: video.categories[0]?.category.name,
         performers: video.performers.map((p) => ({ name: p.performer.name, slug: p.performer.slug })),
         publishedAt: video.releaseDate,
+        comingSoon: scheduled,
+        releaseDate: video.releaseDate?.toISOString() ?? null,
+        isNew: isVideoNew(video, nowMs),
       }
     })
   )
@@ -396,6 +422,8 @@ async function SystemCollectionPage({
 
 // Video Detail Page Component
 async function VideoDetailPage({ slug }: { slug: string }) {
+  await releaseDueVideos()
+
   const video = await prisma.video.findUnique({
     where: { slug },
     include: {
@@ -501,6 +529,49 @@ async function VideoDetailPage({ slug }: { slug: string }) {
     notFound()
   }
 
+  // If this video is SCHEDULED and its releaseDate already passed inside the throttle window, force immediate release
+  let effectiveStatus = video.status
+  let effectivePublishedAt = video.publishedAt
+  const nowMs = Date.now()
+  if (effectiveStatus === "SCHEDULED" && video.releaseDate && video.releaseDate.getTime() <= nowMs) {
+    await releaseDueVideos({ force: true })
+    const refreshed = await prisma.video.findUnique({
+      where: { id: video.id },
+      select: { status: true, publishedAt: true },
+    })
+    if (refreshed) {
+      effectiveStatus = refreshed.status
+      effectivePublishedAt = refreshed.publishedAt
+    }
+  }
+
+  // Never expose DRAFT or ARCHIVED videos publicly
+  if (effectiveStatus === "DRAFT" || effectiveStatus === "ARCHIVED") {
+    notFound()
+  }
+
+  // Gate SCHEDULED videos behind the FOMO Coming Soon view without leaking Mux playback or counting views
+  if (isVideoScheduled({ status: effectiveStatus, releaseDate: video.releaseDate }, nowMs)) {
+    return (
+      <VideoComingSoonView
+        video={{
+          id: video.id,
+          slug: video.slug,
+          title: video.title,
+          description: video.description,
+          thumbnailUrl: video.thumbnailUrl,
+          releaseDate: video.releaseDate?.toISOString() ?? null,
+          categoryName: video.categories[0]?.category.name ?? null,
+          performers: video.performers.map(({ performer }) => ({
+            id: performer.id,
+            slug: performer.slug,
+            name: performer.name,
+          })),
+        }}
+      />
+    )
+  }
+
   // Incrementar contador de vistas
   await prisma.video.update({
     where: { id: video.id },
@@ -512,7 +583,7 @@ async function VideoDetailPage({ slug }: { slug: string }) {
     prisma.video.findFirst({
       where: {
         status: "PUBLISHED",
-        publishedAt: video.publishedAt ? { gt: video.publishedAt } : undefined,
+        publishedAt: effectivePublishedAt ? { gt: effectivePublishedAt } : undefined,
         id: { not: video.id },
       },
       orderBy: { publishedAt: "asc" },
@@ -521,7 +592,7 @@ async function VideoDetailPage({ slug }: { slug: string }) {
     prisma.video.findFirst({
       where: {
         status: "PUBLISHED",
-        publishedAt: video.publishedAt ? { lt: video.publishedAt } : undefined,
+        publishedAt: effectivePublishedAt ? { lt: effectivePublishedAt } : undefined,
         id: { not: video.id },
       },
       orderBy: { publishedAt: "desc" },

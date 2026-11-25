@@ -52,10 +52,16 @@ declare module "next-auth/jwt" {
   }
 }
 
+function generateRuntimeFallbackSecret(): string {
+  const bytes = new Uint8Array(32)
+  crypto.getRandomValues(bytes)
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")
+}
+
 const globalForAuth = globalThis as unknown as { __nextAuthFallbackSecret?: string }
 const fallbackSecret =
   globalForAuth.__nextAuthFallbackSecret ??
-  (globalForAuth.__nextAuthFallbackSecret = crypto.randomUUID())
+  (globalForAuth.__nextAuthFallbackSecret = generateRuntimeFallbackSecret())
 
 const useCrossSiteCookies =
   Boolean(process.env.K_SERVICE) || process.env.AUTH_COOKIE_SAMESITE === "none"
@@ -63,6 +69,36 @@ const useCrossSiteCookies =
 export const authConfig: NextAuthConfig = {
   trustHost: true,
   secret: process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET || fallbackSecret,
+  logger: {
+    error(error) {
+      const errorType = (error as { type?: string }).type || error.name || ""
+      const causeObj = error.cause as { err?: unknown } | Error | undefined
+      const causeErr =
+        causeObj instanceof Error
+          ? causeObj
+          : causeObj && typeof causeObj === "object" && "err" in causeObj && causeObj.err instanceof Error
+            ? causeObj.err
+            : undefined
+      const causeMessage = causeErr?.message || error.message || ""
+
+      // Stale or rotated session cookies fail JWT decryption cleanly (Auth.js returns null session).
+      // Suppress expected decryption-mismatch noise so it does not spam server/browser error consoles.
+      if (
+        errorType === "JWTSessionError" &&
+        (causeMessage.includes("no matching decryption secret") ||
+          causeMessage.includes("decryption operation failed"))
+      ) {
+        return
+      }
+
+      console.error(`[auth][error] ${errorType}: ${error.message}`)
+      if (causeErr?.stack) {
+        console.error(`[auth][cause]:`, causeErr.stack)
+      } else if (error.stack) {
+        console.error(error.stack)
+      }
+    },
+  },
   ...(useCrossSiteCookies
     ? {
         useSecureCookies: true,

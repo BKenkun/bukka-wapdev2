@@ -76,16 +76,21 @@ export async function POST(request: Request) {
         }
 
         if (video) {
+          const shouldAutoPublish = video.status !== "SCHEDULED" && video.status !== "ARCHIVED"
           await prisma.video.update({
             where: { id: video.id },
             data: {
               muxAssetId: assetId,
               muxPlaybackId: playbackId,
               ...(duration && duration > 0 ? { duration: Math.round(duration) } : {}),
-              status: "PUBLISHED",
+              ...(shouldAutoPublish
+                ? { status: "PUBLISHED", publishedAt: video.publishedAt ?? new Date() }
+                : {}),
             },
           })
-          console.log(`[Mux Webhook] Video ${video.id} marked as ready`)
+          console.log(
+            `[Mux Webhook] Video ${video.id} marked as ready (status: ${shouldAutoPublish ? "PUBLISHED" : video.status})`
+          )
         }
         break
       }

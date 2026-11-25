@@ -14,6 +14,16 @@ export const mux = new Mux({
 const signingKeyId = process.env.MUX_SIGNING_KEY_ID
 const signingKeySecret = process.env.MUX_SIGNING_KEY_PRIVATE
 
+/**
+ * Indica si las claves de firma JWT de Mux están configuradas en el entorno.
+ */
+export function isMuxSigningConfigured(): boolean {
+  return Boolean(
+    (signingKeyId || process.env.MUX_SIGNING_KEY_ID) &&
+    (signingKeySecret || process.env.MUX_SIGNING_KEY_PRIVATE)
+  )
+}
+
 export interface CreateUploadResult {
   uploadUrl: string
   uploadId: string

@@ -7,7 +7,9 @@ import { FollowButton } from "@/components/follow-button"
 import { PerformerComingSoonView } from "@/components/performer-coming-soon-view"
 import { releaseDuePerformers } from "@/lib/performer-release"
 import { isPerformerNew, isPerformerScheduled } from "@/lib/performer-status"
-import { getVideoToken, getVideoPreviewUrl } from "@/lib/mux/client"
+import { releaseDueVideos } from "@/lib/video-release"
+import { getPublicVideoPoolWhere, isVideoNew, isVideoScheduled } from "@/lib/video-status"
+import { getVideoToken, getVideoPreviewUrl, isMuxSigningConfigured } from "@/lib/mux/client"
 import Image from "next/image"
 import Link from "next/link"
 
@@ -18,8 +20,9 @@ interface ModelDetailPageProps {
 }
 
 export default async function ModelDetailPage({ params }: ModelDetailPageProps) {
-  await releaseDuePerformers()
-  const nowMs = Date.now()
+  await Promise.all([releaseDuePerformers(), releaseDueVideos()])
+  const now = new Date()
+  const nowMs = now.getTime()
   const { slug } = await params
 
   const performer = await prisma.performer.findUnique({
@@ -31,9 +34,9 @@ export default async function ModelDetailPage({ params }: ModelDetailPageProps) 
         take: 6,
       },
       VideoPerformer: {
-        where: { video: { status: "PUBLISHED" } },
+        where: { video: getPublicVideoPoolWhere(now) },
         orderBy: { video: { releaseDate: "desc" } },
-        take: 7, // 1 for latest release + 6 for grid
+        take: 10,
         include: {
           video: {
             select: {
@@ -47,7 +50,17 @@ export default async function ModelDetailPage({ params }: ModelDetailPageProps) 
               muxPlaybackId: true,
               previewStartTime: true,
               previewEndTime: true,
+              status: true,
+              publishedAt: true,
               releaseDate: true,
+              categories: {
+                include: {
+                  category: {
+                    select: { name: true },
+                  },
+                },
+                take: 1,
+              },
             },
           },
         },
@@ -100,16 +113,23 @@ export default async function ModelDetailPage({ params }: ModelDetailPageProps) 
 
   const isNewPerformer = isPerformerNew(performer, nowMs)
 
-  // Separate latest release from other videos
-  const latestRelease = performer.VideoPerformer[0]?.video || null
-  const otherVideos = performer.VideoPerformer.slice(1).map(vp => vp.video)
+  // Separate upcoming (10-day window) and published videos; keep latestRelease strictly PUBLISHED
+  const allPerformerVideos = performer.VideoPerformer.map((vp) => vp.video)
+  const upcomingVideos = allPerformerVideos
+    .filter((v) => isVideoScheduled(v, nowMs))
+    .sort((a, b) => a.releaseDate.getTime() - b.releaseDate.getTime())
+  const publishedVideos = allPerformerVideos.filter((v) => !isVideoScheduled(v, nowMs))
 
-  // Generate preview URLs for videos with Mux playback IDs
+  const latestRelease = publishedVideos[0] || null
+  const otherVideos = [...upcomingVideos, ...publishedVideos.slice(1)].slice(0, 9)
+
+  // Generate preview URLs for published videos with Mux playback IDs
   const videosWithPreviews = await Promise.all(
     otherVideos.map(async (video) => {
+      const scheduled = isVideoScheduled(video, nowMs)
       let previewUrl: string | undefined = undefined
 
-      if (video.muxPlaybackId) {
+      if (!scheduled && video.muxPlaybackId && isMuxSigningConfigured()) {
         try {
           const token = await getVideoToken(video.muxPlaybackId)
           previewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "medium")
@@ -121,6 +141,9 @@ export default async function ModelDetailPage({ params }: ModelDetailPageProps) 
       return {
         ...video,
         previewUrl,
+        comingSoon: scheduled,
+        isNew: isVideoNew(video, nowMs),
+        category: video.categories[0]?.category.name,
       }
     })
   )
@@ -515,7 +538,12 @@ export default async function ModelDetailPage({ params }: ModelDetailPageProps) 
                   slug={video.slug}
                   videoId={video.id}
                   variant="below"
+                  category={video.category}
+                  performers={[{ name: performer.name, slug: performer.slug }]}
                   publishedAt={video.releaseDate || undefined}
+                  comingSoon={video.comingSoon}
+                  releaseDate={video.releaseDate?.toISOString() ?? null}
+                  isNew={video.isNew}
                 />
               ))}
             </div>

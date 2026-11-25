@@ -92,6 +92,16 @@ export async function POST(
 
     return NextResponse.json({ subscribed: true })
   } catch (error) {
+    const err = error as { code?: string; message?: string }
+    if (
+      err?.code === "P2021" ||
+      (typeof err?.message === "string" && err.message.includes("VideoNotify"))
+    ) {
+      return NextResponse.json(
+        { error: "Notification table pending database migration" },
+        { status: 503 }
+      )
+    }
     console.error("Video notify toggle error:", error)
     return NextResponse.json({ error: "Server error" }, { status: 500 })
   }

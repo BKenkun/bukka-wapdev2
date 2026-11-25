@@ -2,11 +2,14 @@ import { NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { releaseDuePerformers } from "@/lib/performer-release"
 import { isPerformerNew, isPerformerScheduled } from "@/lib/performer-status"
+import { releaseDueVideos } from "@/lib/video-release"
+import { getPublicVideoPoolWhere, isVideoNew, isVideoScheduled } from "@/lib/video-status"
 
 export async function GET(request: Request) {
   try {
-    await releaseDuePerformers()
-    const nowMs = Date.now()
+    await Promise.all([releaseDuePerformers(), releaseDueVideos()])
+    const now = new Date()
+    const nowMs = now.getTime()
     const { searchParams } = new URL(request.url)
     const query = searchParams.get("q")?.trim()
     const limit = parseInt(searchParams.get("limit") || "5")
@@ -281,13 +284,17 @@ export async function GET(request: Request) {
         orderBy: { createdAt: "desc" },
       }),
 
-      // Search videos
+      // Search videos (published + scheduled within 10-day window)
       prisma.video.findMany({
         where: {
-          status: "PUBLISHED",
-          OR: [
-            { title: { contains: query, mode: "insensitive" } },
-            { description: { contains: query, mode: "insensitive" } },
+          AND: [
+            getPublicVideoPoolWhere(now),
+            {
+              OR: [
+                { title: { contains: query, mode: "insensitive" } },
+                { description: { contains: query, mode: "insensitive" } },
+              ],
+            },
           ],
         },
         select: {
@@ -297,9 +304,12 @@ export async function GET(request: Request) {
           thumbnailUrl: true,
           duration: true,
           viewCount: true,
+          status: true,
+          publishedAt: true,
+          releaseDate: true,
         },
         take: limit,
-        orderBy: { createdAt: "desc" },
+        orderBy: { releaseDate: "desc" },
       }),
 
       // Search performers (models)
@@ -358,9 +368,21 @@ export async function GET(request: Request) {
       }
     })
 
+    const transformedVideos = videos.map((v) => ({
+      id: v.id,
+      slug: v.slug,
+      title: v.title,
+      thumbnailUrl: v.thumbnailUrl,
+      duration: v.duration,
+      viewCount: v.viewCount,
+      comingSoon: isVideoScheduled(v, nowMs),
+      releaseDate: v.releaseDate?.toISOString() ?? null,
+      isNew: isVideoNew(v, nowMs),
+    }))
+
     return NextResponse.json({
       products: transformedProducts,
-      videos,
+      videos: transformedVideos,
       performers: transformedPerformers,
     })
   } catch (error) {

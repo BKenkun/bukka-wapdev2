@@ -13,6 +13,17 @@ export interface VideoReleaseSummary {
   notifiedEmails: number
 }
 
+function isMissingVideoNotifyTableError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false
+  const err = error as { code?: string; message?: string }
+  return (
+    err.code === "P2021" ||
+    (typeof err.message === "string" &&
+      err.message.includes("VideoNotify") &&
+      err.message.includes("does not exist"))
+  )
+}
+
 export async function notifyVideoSubscribers(video: {
   id: string
   slug: string
@@ -21,14 +32,26 @@ export async function notifyVideoSubscribers(video: {
   performerNames?: string | null
   categoryName?: string | null
 }): Promise<number> {
-  const subscribers = await prisma.videoNotify.findMany({
-    where: { videoId: video.id, notified: false },
-    include: {
-      user: {
-        select: { id: true, email: true, name: true },
+  let subscribers: Array<{
+    id: string
+    user: { id: string; email: string | null; name: string | null }
+  }> = []
+
+  try {
+    subscribers = await prisma.videoNotify.findMany({
+      where: { videoId: video.id, notified: false },
+      include: {
+        user: {
+          select: { id: true, email: true, name: true },
+        },
       },
-    },
-  })
+    })
+  } catch (error) {
+    if (isMissingVideoNotifyTableError(error)) {
+      return 0
+    }
+    throw error
+  }
 
   if (subscribers.length === 0) {
     return 0
@@ -166,28 +189,35 @@ async function runDueVideosRelease(awaitNotifications: boolean): Promise<VideoRe
   }
 
   // 2) Also notify any pending subscribers for already-PUBLISHED videos whose releaseDate has now passed
-  const duePublishedWithPending = await prisma.video.findMany({
-    where: {
-      status: "PUBLISHED",
-      releaseDate: { lte: now },
-      notifications: {
-        some: { notified: false },
+  let duePublishedWithPending: typeof dueScheduledVideos = []
+  try {
+    duePublishedWithPending = await prisma.video.findMany({
+      where: {
+        status: "PUBLISHED",
+        releaseDate: { lte: now },
+        notifications: {
+          some: { notified: false },
+        },
       },
-    },
-    select: {
-      id: true,
-      slug: true,
-      title: true,
-      thumbnailUrl: true,
-      performers: {
-        include: { performer: { select: { name: true } } },
+      select: {
+        id: true,
+        slug: true,
+        title: true,
+        thumbnailUrl: true,
+        performers: {
+          include: { performer: { select: { name: true } } },
+        },
+        categories: {
+          include: { category: { select: { name: true } } },
+          take: 1,
+        },
       },
-      categories: {
-        include: { category: { select: { name: true } } },
-        take: 1,
-      },
-    },
-  })
+    })
+  } catch (error) {
+    if (!isMissingVideoNotifyTableError(error)) {
+      throw error
+    }
+  }
 
   for (const video of duePublishedWithPending) {
     if (handledVideoIds.has(video.id)) continue

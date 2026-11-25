@@ -23,6 +23,9 @@ interface Video {
   category?: string
   performers?: Performer[]
   publishedAt?: Date | string
+  comingSoon?: boolean
+  releaseDate?: string | null
+  isNew?: boolean
 }
 
 interface VideoCarouselProps {
@@ -219,6 +222,9 @@ export function VideoCarousel({ videos = [], variant = "overlay" }: VideoCarouse
               category={video.category}
               performers={video.performers}
               publishedAt={video.publishedAt}
+              comingSoon={video.comingSoon}
+              releaseDate={video.releaseDate}
+              isNew={video.isNew}
             />
           </div>
         ))}

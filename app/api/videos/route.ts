@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { auth } from "@/auth"
-import { VideoStatus } from "@prisma/client"
+import { releaseDueVideos } from "@/lib/video-release"
+import { getPublicVideoPoolWhere, isVideoNew, isVideoScheduled } from "@/lib/video-status"
 
 // POST - Crear video (admin only)
 export async function POST(request: NextRequest) {
@@ -69,6 +70,7 @@ export async function POST(request: NextRequest) {
         thumbnailUrl,
         previewUrl: previewUrl || null,
         status: status || "DRAFT",
+        publishedAt: status === "PUBLISHED" ? new Date() : null,
         minTierPlanId: minTierPlanId || null,
         isDiamondExclusive: isDiamondExclusive || false,
         isLimitedEdition: isLimitedEdition || false,
@@ -132,6 +134,9 @@ export async function POST(request: NextRequest) {
 
 export async function GET(request: NextRequest) {
   try {
+    await releaseDueVideos()
+    const now = new Date()
+    const nowMs = now.getTime()
     const { searchParams } = new URL(request.url)
 
     // Parámetros de paginación
@@ -175,16 +180,20 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Construir query
-    const where: Record<string, unknown> = {
-      status: VideoStatus.PUBLISHED,
-    }
-
-    // Filtrar por nivel de plan (mostrar videos con nivel <= al del usuario)
-    where.OR = [
-      { minTierPlan: null },
-      { minTierPlan: { level: { lte: userPlan.level } } },
+    // Construir query (publicados + programados dentro de los próximos 10 días)
+    const andConditions: Record<string, unknown>[] = [
+      getPublicVideoPoolWhere(now) as Record<string, unknown>,
+      {
+        OR: [
+          { minTierPlan: null },
+          { minTierPlan: { level: { lte: userPlan.level } } },
+        ],
+      },
     ]
+
+    const where: Record<string, unknown> = {
+      AND: andConditions,
+    }
 
     // Filtrar Diamond exclusives si no puede acceder
     if (!userPlan.canAccessExclusive) {
@@ -193,16 +202,13 @@ export async function GET(request: NextRequest) {
 
     // Filtrar Limited Edition si no puede acceder
     if (!userPlan.canAccessLimitedEdition) {
-      where.AND = [
-        ...(Array.isArray(where.AND) ? where.AND : []),
-        {
-          OR: [
-            { isLimitedEdition: false },
-            { limitedAccessUntil: { lte: new Date() } },
-            { limitedAccessUntil: null },
-          ],
-        },
-      ]
+      andConditions.push({
+        OR: [
+          { isLimitedEdition: false },
+          { limitedAccessUntil: { lte: now } },
+          { limitedAccessUntil: null },
+        ],
+      })
     }
 
     // Filtro por categoría
@@ -234,15 +240,12 @@ export async function GET(request: NextRequest) {
 
     // Búsqueda por texto
     if (search) {
-      where.AND = [
-        ...(Array.isArray(where.AND) ? where.AND : []),
-        {
-          OR: [
-            { title: { contains: search, mode: "insensitive" } },
-            { description: { contains: search, mode: "insensitive" } },
-          ],
-        },
-      ]
+      andConditions.push({
+        OR: [
+          { title: { contains: search, mode: "insensitive" } },
+          { description: { contains: search, mode: "insensitive" } },
+        ],
+      })
     }
 
     // Ordenación
@@ -305,13 +308,17 @@ export async function GET(request: NextRequest) {
       prisma.video.count({ where }),
     ])
 
-    // Transformar respuesta con preview URL de video MP4
+    // Transformar respuesta con preview URL de video MP4 (sin exponer preview/stream para programados)
     const transformedVideos = videos.map((video) => {
-      // Generar URL del preview MP4 video
-      let previewVideoUrl = video.previewUrl
-      if (video.muxPlaybackId) {
-        // Usar MP4 medium quality (960x540) para preview
-        previewVideoUrl = `https://stream.mux.com/${video.muxPlaybackId}/medium.mp4`
+      const scheduled = isVideoScheduled(video, nowMs)
+      let previewVideoUrl: string | null = null
+
+      if (!scheduled) {
+        previewVideoUrl = video.previewUrl
+        if (video.muxPlaybackId) {
+          // Usar MP4 medium quality (960x540) para preview
+          previewVideoUrl = `https://stream.mux.com/${video.muxPlaybackId}/medium.mp4`
+        }
       }
 
       return {
@@ -326,6 +333,8 @@ export async function GET(request: NextRequest) {
         previewEndTime: video.previewEndTime,
         duration: video.duration,
         releaseDate: video.releaseDate,
+        comingSoon: scheduled,
+        isNew: isVideoNew(video, nowMs),
         viewCount: video.viewCount,
         likeCount: video.likeCount,
         minTierPlan: video.minTierPlan,

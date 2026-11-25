@@ -22,6 +22,9 @@ interface Video {
   thumbnailUrl: string
   duration: number
   viewCount: number
+  comingSoon?: boolean
+  releaseDate?: string | null
+  isNew?: boolean
 }
 
 interface Performer {
@@ -582,24 +585,43 @@ export function SearchModal({ open, onOpenChange }: SearchModalProps) {
                               src={video.thumbnailUrl}
                               alt={video.title}
                               fill
-                              className="object-cover"
+                              className={`object-cover ${video.comingSoon ? "brightness-50" : ""}`}
                             />
                           ) : (
                             <div className="w-full h-full flex items-center justify-center">
                               <Play className="w-5 h-5 text-zinc-600" />
                             </div>
                           )}
-                          {video.duration > 0 && (
+                          {!video.comingSoon && video.duration > 0 && (
                             <div className="absolute bottom-1 right-1 bg-black/80 px-1 text-[10px] text-white font-medium">
                               {formatDuration(video.duration)}
                             </div>
                           )}
                         </div>
                         <div className="flex-1 min-w-0">
-                          <p className="text-white text-sm font-medium truncate">{video.title}</p>
-                          <p className="text-zinc-500 text-xs">
-                            {video.viewCount.toLocaleString()} views
-                          </p>
+                          <div className="flex items-center gap-2">
+                            <p className="text-white text-sm font-medium truncate">{video.title}</p>
+                            {video.comingSoon ? (
+                              <span className="px-1.5 py-0.5 text-[9px] font-bold tracking-wider uppercase bg-zinc-700 text-white shrink-0">
+                                Coming Soon
+                              </span>
+                            ) : video.isNew ? (
+                              <span className="px-1.5 py-0.5 text-[9px] font-bold tracking-wider uppercase bg-[#FA4860] text-white shrink-0">
+                                NEW
+                              </span>
+                            ) : null}
+                          </div>
+                          {video.comingSoon ? (
+                            <p className="text-zinc-500 text-xs">
+                              {video.releaseDate
+                                ? `Releases ${new Date(video.releaseDate).toLocaleDateString("en-US", { dateStyle: "medium" })}`
+                                : "Scheduled release"}
+                            </p>
+                          ) : (
+                            <p className="text-zinc-500 text-xs">
+                              {video.viewCount.toLocaleString()} views
+                            </p>
+                          )}
                         </div>
                       </Link>
                     )

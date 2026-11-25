@@ -4,6 +4,8 @@ import { auth } from "@/auth"
 import { checkVideoAccess } from "@/lib/subscription-guard"
 import { deleteMuxAsset } from "@/lib/mux/client"
 import { deleteLocalFile } from "@/lib/file-utils"
+import { releaseDueVideos } from "@/lib/video-release"
+import { isVideoNew, isVideoScheduled } from "@/lib/video-status"
 
 interface RouteParams {
   params: Promise<{ slug: string }>
@@ -163,6 +165,13 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
       }
     }
 
+    const nextPublishedAt =
+      status === "PUBLISHED"
+        ? existingVideo.publishedAt ?? new Date()
+        : status === "SCHEDULED" || status === "DRAFT"
+          ? null
+          : undefined
+
     const video = await prisma.video.update({
       where: { id: existingVideo.id },
       data: {
@@ -172,6 +181,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
         thumbnailUrl,
         previewUrl: previewUrl || null,
         status,
+        ...(nextPublishedAt !== undefined && { publishedAt: nextPublishedAt }),
         minTierPlanId: minTierPlanId !== undefined ? minTierPlanId : undefined,
         isDiamondExclusive,
         isLimitedEdition,
@@ -272,6 +282,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
 
 export async function GET(request: NextRequest, { params }: RouteParams) {
   try {
+    await releaseDueVideos()
     const { slug } = await params
 
     const video = await prisma.video.findUnique({
@@ -337,6 +348,50 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
 
     if (!video) {
       return NextResponse.json({ error: "Video not found" }, { status: 404 })
+    }
+
+    const nowMs = Date.now()
+    let effectiveStatus = video.status
+    let effectivePublishedAt = video.publishedAt
+    if (effectiveStatus === "SCHEDULED" && video.releaseDate && video.releaseDate.getTime() <= nowMs) {
+      await releaseDueVideos({ force: true })
+      const refreshed = await prisma.video.findUnique({
+        where: { id: video.id },
+        select: { status: true, publishedAt: true },
+      })
+      if (refreshed) {
+        effectiveStatus = refreshed.status
+        effectivePublishedAt = refreshed.publishedAt
+      }
+    }
+
+    if (effectiveStatus === "DRAFT" || effectiveStatus === "ARCHIVED") {
+      return NextResponse.json({ error: "Video not found" }, { status: 404 })
+    }
+
+    if (isVideoScheduled({ status: effectiveStatus, releaseDate: video.releaseDate }, nowMs)) {
+      return NextResponse.json({
+        id: video.id,
+        slug: video.slug,
+        title: video.title,
+        description: video.description,
+        thumbnailUrl: video.thumbnailUrl,
+        previewUrl: null,
+        duration: video.duration,
+        releaseDate: video.releaseDate,
+        comingSoon: true,
+        isNew: false,
+        viewCount: video.viewCount,
+        likeCount: video.likeCount,
+        performers: video.performers.map((vp) => vp.performer),
+        categories: video.categories.map((vc) => vc.category),
+        tags: video.tags.map((vt) => vt.tag),
+        access: {
+          hasAccess: false,
+          reason: "SCHEDULED",
+          availableAt: video.releaseDate,
+        },
+      })
     }
 
     // Verificar acceso
@@ -412,6 +467,11 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       previewUrl: previewVideoUrl,
       duration: video.duration,
       releaseDate: video.releaseDate,
+      comingSoon: false,
+      isNew: isVideoNew(
+        { status: effectiveStatus, publishedAt: effectivePublishedAt, releaseDate: video.releaseDate },
+        nowMs
+      ),
       viewCount: video.viewCount + (accessResult.hasAccess ? 1 : 0),
       likeCount: video.likeCount,
       minTierPlan: video.minTierPlan,

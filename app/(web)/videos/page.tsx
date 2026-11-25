@@ -1,7 +1,9 @@
 import { prisma } from "@/lib/prisma"
 import { HomeSectionRenderer } from "@/components/home/home-section-renderer"
 import { VideosPageClient } from "./videos-page-client"
-import { getVideoToken, getVideoPreviewUrl } from "@/lib/mux/client"
+import { getVideoToken, getVideoPreviewUrl, isMuxSigningConfigured } from "@/lib/mux/client"
+import { releaseDueVideos } from "@/lib/video-release"
+import { getPublicVideoPoolWhere, isVideoNew, isVideoScheduled } from "@/lib/video-status"
 
 interface SearchParams {
   page?: string
@@ -16,6 +18,10 @@ export default async function VideosPage({
 }: {
   searchParams: Promise<SearchParams>
 }) {
+  await releaseDueVideos()
+  const now = new Date()
+  const nowMs = now.getTime()
+
   const params = await searchParams
   const page = Number(params.page) || 1
   const pageSize = 12
@@ -44,9 +50,9 @@ export default async function VideosPage({
       orderBy = { releaseDate: "desc" }
   }
 
-  // Build where clause
+  // Build where clause (published + scheduled within 10-day window)
   const whereClause: Record<string, unknown> = {
-    status: "PUBLISHED",
+    AND: [getPublicVideoPoolWhere(now)],
   }
 
   if (categorySlug) {
@@ -91,6 +97,8 @@ export default async function VideosPage({
         muxPlaybackId: true,
         viewCount: true,
         likeCount: true,
+        status: true,
+        publishedAt: true,
         releaseDate: true,
         performers: {
           include: {
@@ -137,20 +145,25 @@ export default async function VideosPage({
 
   const totalPages = Math.ceil(totalCount / pageSize)
 
-  // Transform videos for the grid with signed preview URLs
+  // Transform videos for the grid with signed preview URLs (skip previews for scheduled videos)
   const transformedVideos = await Promise.all(
     videos.map(async (video) => {
-      // Use custom previewUrl if available, otherwise use signed Mux MP4
-      let videoPreviewUrl = video.previewUrl || undefined
+      const scheduled = isVideoScheduled(video, nowMs)
+      let videoPreviewUrl: string | undefined = undefined
 
-      if (!videoPreviewUrl && video.muxPlaybackId) {
-        try {
-          // Generate signed token for Mux MP4 preview
-          const token = await getVideoToken(video.muxPlaybackId)
-          videoPreviewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "medium")
-        } catch (error) {
-          console.warn(`Failed to generate preview token for video ${video.id}:`, error)
-          // Fallback: leave previewUrl undefined
+      if (!scheduled) {
+        // Use custom previewUrl if available, otherwise use signed Mux MP4
+        videoPreviewUrl = video.previewUrl || undefined
+
+        if (!videoPreviewUrl && video.muxPlaybackId && isMuxSigningConfigured()) {
+          try {
+            // Generate signed token for Mux MP4 preview
+            const token = await getVideoToken(video.muxPlaybackId)
+            videoPreviewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "medium")
+          } catch (error) {
+            console.warn(`Failed to generate preview token for video ${video.id}:`, error)
+            // Fallback: leave previewUrl undefined
+          }
         }
       }
 
@@ -167,6 +180,9 @@ export default async function VideosPage({
         category: video.categories[0]?.category.name,
         performers: video.performers.map((p) => ({ name: p.performer.name, slug: p.performer.slug })),
         publishedAt: video.releaseDate,
+        comingSoon: scheduled,
+        releaseDate: video.releaseDate?.toISOString() ?? null,
+        isNew: isVideoNew(video, nowMs),
       }
     })
   )

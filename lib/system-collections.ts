@@ -1,5 +1,7 @@
 import { prisma } from "@/lib/prisma"
 import { SystemCollectionType } from "@prisma/client"
+import { releaseDueVideos } from "@/lib/video-release"
+import { getPublicVideoPoolWhere } from "@/lib/video-status"
 
 export interface SystemCollectionInfo {
   type: SystemCollectionType
@@ -51,6 +53,8 @@ const videoSelect = {
   muxPlaybackId: true,
   viewCount: true,
   likeCount: true,
+  status: true,
+  publishedAt: true,
   releaseDate: true,
   duration: true,
   performers: {
@@ -83,6 +87,8 @@ export async function getVideosForSystemCollection(
   type: SystemCollectionType,
   options: GetVideosOptions = {}
 ) {
+  await releaseDueVideos()
+  const now = new Date()
   const { skip = 0, take = 24 } = options
   const baseWhere = { status: "PUBLISHED" as const }
 
@@ -98,9 +104,9 @@ export async function getVideosForSystemCollection(
       })
 
     case "NUEVOS":
-      // Newest videos by release date
+      // Newest videos plus upcoming drops within 10 days
       return prisma.video.findMany({
-        where: baseWhere,
+        where: getPublicVideoPoolWhere(now),
         orderBy: { releaseDate: "desc" },
         skip,
         take,
@@ -211,9 +217,14 @@ export async function getVideosForSystemCollection(
 export async function getVideoCountForSystemCollection(
   type: SystemCollectionType
 ): Promise<number> {
+  await releaseDueVideos()
+  const now = new Date()
   const baseWhere = { status: "PUBLISHED" as const }
 
   switch (type) {
+    case "NUEVOS":
+      return prisma.video.count({ where: getPublicVideoPoolWhere(now) })
+
     case "TENDENCIAS": {
       const oneWeekAgo = new Date()
       oneWeekAgo.setDate(oneWeekAgo.getDate() - 7)

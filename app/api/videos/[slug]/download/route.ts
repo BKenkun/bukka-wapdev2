@@ -3,6 +3,8 @@ import { prisma } from "@/lib/prisma"
 import { auth } from "@/auth"
 import { checkVideoAccess } from "@/lib/subscription-guard"
 import { getVideoToken, getMuxAsset } from "@/lib/mux/client"
+import { releaseDueVideos } from "@/lib/video-release"
+import { isVideoScheduled } from "@/lib/video-status"
 
 interface RouteParams {
   params: Promise<{ slug: string }>
@@ -47,6 +49,8 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       )
     }
 
+    await releaseDueVideos()
+
     // Obtener el video
     const video = await prisma.video.findUnique({
       where: { slug },
@@ -59,6 +63,32 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
 
     if (!video) {
       return NextResponse.json({ error: "Video not found" }, { status: 404 })
+    }
+
+    const nowMs = Date.now()
+    let effectiveStatus = video.status
+    if (effectiveStatus === "SCHEDULED" && video.releaseDate && video.releaseDate.getTime() <= nowMs) {
+      await releaseDueVideos({ force: true })
+      const refreshed = await prisma.video.findUnique({
+        where: { id: video.id },
+        select: { status: true },
+      })
+      if (refreshed) effectiveStatus = refreshed.status
+    }
+
+    if (effectiveStatus === "DRAFT" || effectiveStatus === "ARCHIVED") {
+      return NextResponse.json({ error: "Video not found" }, { status: 404 })
+    }
+
+    if (isVideoScheduled({ status: effectiveStatus, releaseDate: video.releaseDate }, nowMs)) {
+      return NextResponse.json(
+        {
+          error: "This video is scheduled and not available yet",
+          reason: "SCHEDULED",
+          availableAt: video.releaseDate,
+        },
+        { status: 403 }
+      )
     }
 
     if (!video.muxPlaybackId || !video.muxAssetId) {
