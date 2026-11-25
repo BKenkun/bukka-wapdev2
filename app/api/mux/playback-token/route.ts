@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/prisma"
-import { getPlaybackToken } from "@/lib/mux/client"
+import { getPlaybackToken, isMuxSigningConfigured } from "@/lib/mux/client"
 
 export async function GET(request: NextRequest) {
   try {
@@ -27,9 +27,16 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "playbackId required" }, { status: 400 })
     }
 
+    if (!isMuxSigningConfigured()) {
+      return NextResponse.json({
+        token: null,
+        configured: false,
+      })
+    }
+
     const token = await getPlaybackToken(playbackId, session.user.id)
 
-    return NextResponse.json({ token })
+    return NextResponse.json({ token, configured: true })
   } catch (error) {
     console.error("Error getting playback token:", error)
     return NextResponse.json(

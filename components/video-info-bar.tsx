@@ -264,7 +264,7 @@ export function VideoInfoBar({
               >
                 <WaterDropIcon className="w-[22px] h-[29px]" filled={isFavorite} />
                 <span style={{ fontSize: "16px", fontWeight: 400, lineHeight: "24px", color: isFavorite ? "var(--brand-color)" : "var(--text-primary)" }}>
-                  {favoriteCount.toLocaleString()}
+                  {favoriteCount.toLocaleString("en-US")}
                 </span>
               </button>
 

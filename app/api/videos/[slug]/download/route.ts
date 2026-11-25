@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { auth } from "@/auth"
 import { checkVideoAccess } from "@/lib/subscription-guard"
-import { getVideoToken, getMuxAsset } from "@/lib/mux/client"
+import { getVideoToken, getMuxAsset, isMuxSigningConfigured } from "@/lib/mux/client"
 import { releaseDueVideos } from "@/lib/video-release"
 import { isVideoScheduled } from "@/lib/video-status"
 import {
@@ -169,6 +169,16 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
           daysRemaining: downloadAvailability.daysRemaining,
         },
         { status: 403 }
+      )
+    }
+
+    if (!isMuxSigningConfigured()) {
+      return NextResponse.json(
+        {
+          error: "Video downloads are not configured in this environment",
+          code: "MUX_NOT_CONFIGURED",
+        },
+        { status: 503 }
       )
     }
 

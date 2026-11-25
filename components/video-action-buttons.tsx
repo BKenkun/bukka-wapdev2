@@ -215,7 +215,7 @@ export function VideoActionButtons({
             color: isFavorite ? "color-mix(in srgb, var(--brand-color) 70%, transparent)" : "inherit",
           }}
         >
-          {favoriteCount.toLocaleString()}
+          {favoriteCount.toLocaleString("en-US")}
         </span>
       </button>
 

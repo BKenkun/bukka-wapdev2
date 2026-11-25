@@ -301,5 +301,6 @@ export function formatDownloadUnlockDate(
     year: "numeric",
     month: "short",
     day: "numeric",
+    timeZone: "UTC",
   }).format(d)
 }

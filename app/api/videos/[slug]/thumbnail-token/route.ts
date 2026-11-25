@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getThumbnailToken } from "@/lib/mux/client"
+import { getThumbnailToken, isMuxSigningConfigured } from "@/lib/mux/client"
 import { releaseDueVideos } from "@/lib/video-release"
 import { isVideoScheduled } from "@/lib/video-status"
 
@@ -43,9 +43,13 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       )
     }
 
+    if (!isMuxSigningConfigured()) {
+      return NextResponse.json({ token: null, configured: false })
+    }
+
     const token = await getThumbnailToken(video.muxPlaybackId)
 
-    return NextResponse.json({ token })
+    return NextResponse.json({ token, configured: true })
   } catch (error) {
     console.error("Error getting thumbnail token:", error)
     return NextResponse.json(

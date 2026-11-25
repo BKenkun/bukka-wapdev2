@@ -208,6 +208,7 @@ export function VideoForm({
   const [isDraggingPreview, setIsDraggingPreview] = React.useState(false)
   const dragCounterRef = React.useRef(0)
   const [playbackToken, setPlaybackToken] = React.useState<string | null>(null)
+  const [isMuxPlaybackConfigured, setIsMuxPlaybackConfigured] = React.useState(true)
   const [isLoadingPreview, setIsLoadingPreview] = React.useState(false)
   const [customPreviewUrl, setCustomPreviewUrl] = React.useState<string | null>(video?.previewUrl || null)
   const [isUploadingPreview, setIsUploadingPreview] = React.useState(false)
@@ -222,9 +223,9 @@ export function VideoForm({
     if (!initialDownloadOverride?.availableAt) return ""
     const d = new Date(initialDownloadOverride.availableAt)
     if (Number.isNaN(d.getTime())) return ""
-    const pad = (n: number) => String(n).padStart(2, "0")
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+    return d.toISOString().slice(0, 16)
   })
+  const [hasMounted, setHasMounted] = React.useState(false)
 
 
   // Local upload function for thumbnails
@@ -338,10 +339,10 @@ export function VideoForm({
         ? new Date(video.limitedAccessUntil).toISOString().split("T")[0]
         : "",
       releaseDate: (() => {
-        const d = video?.releaseDate ? new Date(video.releaseDate) : new Date()
+        if (!video?.releaseDate) return ""
+        const d = new Date(video.releaseDate)
         if (Number.isNaN(d.getTime())) return ""
-        const pad = (n: number) => String(n).padStart(2, "0")
-        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+        return d.toISOString().slice(0, 16)
       })(),
       // Preview settings (Mux MP4)
       previewStartTime: video?.previewStartTime ?? 0,
@@ -350,6 +351,29 @@ export function VideoForm({
       metaDescription: video?.metaDescription || "",
     },
   })
+
+  // Hydrate datetime-local inputs into the user's browser timezone after mount (prevents SSR hydration mismatch)
+  React.useEffect(() => {
+    const toLocalDateTimeInput = (d: Date) => {
+      const pad = (n: number) => String(n).padStart(2, "0")
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+    }
+
+    const baseRelease = video?.releaseDate ? new Date(video.releaseDate) : new Date()
+    if (!Number.isNaN(baseRelease.getTime())) {
+      setValue("releaseDate", toLocalDateTimeInput(baseRelease))
+    }
+
+    if (initialDownloadOverride?.availableAt) {
+      const customD = new Date(initialDownloadOverride.availableAt)
+      if (!Number.isNaN(customD.getTime())) {
+        setDownloadCustomDate(toLocalDateTimeInput(customD))
+      }
+    }
+
+    setHasMounted(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const watchTitle = watch("title")
   const watchReleaseDate = watch("releaseDate")
@@ -362,7 +386,10 @@ export function VideoForm({
     if (!globalDownloadPolicy.enabled || globalDownloadPolicy.delayValue <= 0) {
       return null
     }
-    const base = watchReleaseDate ? new Date(watchReleaseDate) : new Date()
+    if (!watchReleaseDate) return null
+    const base = hasMounted
+      ? new Date(watchReleaseDate)
+      : new Date(`${watchReleaseDate}Z`)
     if (Number.isNaN(base.getTime())) return null
     const unlockDate = addDelayToDate(
       base,
@@ -370,7 +397,7 @@ export function VideoForm({
       globalDownloadPolicy.delayUnit
     )
     return formatDownloadUnlockDate(unlockDate, "es")
-  }, [watchReleaseDate, globalDownloadPolicy])
+  }, [watchReleaseDate, globalDownloadPolicy, hasMounted])
 
   // Check Mux asset status
   const checkMuxAssetStatus = React.useCallback(async () => {
@@ -427,13 +454,17 @@ export function VideoForm({
         const response = await fetch(`/api/mux/playback-token?playbackId=${muxPlaybackId}`)
         if (response.ok) {
           const data = await response.json()
-          setPlaybackToken(data.token)
+          if (data.configured === false || !data.token) {
+            setIsMuxPlaybackConfigured(false)
+            setPlaybackToken(null)
+          } else {
+            setIsMuxPlaybackConfigured(true)
+            setPlaybackToken(data.token)
+          }
         } else {
-          console.error("Error fetching playback token")
           setPlaybackToken(null)
         }
-      } catch (error) {
-        console.error("Error fetching playback token:", error)
+      } catch {
         setPlaybackToken(null)
       } finally {
         setIsLoadingPreview(false)
@@ -1168,9 +1199,13 @@ export function VideoForm({
                                 streamType="on-demand"
                               />
                             ) : (
-                              <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
+                              <div className="flex flex-col items-center justify-center h-full px-4 text-center text-muted-foreground">
                                 <IconInfoCircle className="size-8 mb-2" />
-                                <span className="text-xs">Cargando preview...</span>
+                                <span className="text-xs">
+                                  {isMuxPlaybackConfigured
+                                    ? "Cargando preview..."
+                                    : "Vista previa no disponible (claves de firma Mux no configuradas en este entorno)"}
+                                </span>
                               </div>
                             )}
                           </div>

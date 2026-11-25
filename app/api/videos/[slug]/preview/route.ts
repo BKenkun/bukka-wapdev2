@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getVideoToken, getVideoPreviewUrl } from "@/lib/mux/client"
+import { getVideoToken, getVideoPreviewUrl, isMuxSigningConfigured } from "@/lib/mux/client"
 import { releaseDueVideos } from "@/lib/video-release"
 import { isVideoScheduled } from "@/lib/video-status"
 
@@ -68,6 +68,14 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
         { error: "The video has not been processed in Mux yet" },
         { status: 400 }
       )
+    }
+
+    if (!isMuxSigningConfigured()) {
+      return NextResponse.json({
+        previewUrl: null,
+        playbackId: video.muxPlaybackId,
+        configured: false,
+      })
     }
 
     // Generar token firmado para el video MP4

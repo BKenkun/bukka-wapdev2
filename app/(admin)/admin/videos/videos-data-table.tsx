@@ -303,7 +303,7 @@ export function VideosDataTable({
           <div className="text-sm">
             <div className="flex items-center gap-1">
               <IconEye className="size-3 text-muted-foreground" />
-              <span>{video.viewCount.toLocaleString()}</span>
+              <span>{video.viewCount.toLocaleString("es-ES")}</span>
             </div>
             <div className="text-muted-foreground text-xs">
               {video._count.favorites} favs
@@ -332,6 +332,7 @@ export function VideosDataTable({
               day: "2-digit",
               month: "short",
               year: "numeric",
+              timeZone: "UTC",
             })}
           </span>
         )

@@ -2,7 +2,11 @@ import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { auth } from "@/auth"
 import { checkVideoAccess } from "@/lib/subscription-guard"
-import { getPlaybackToken, planQualityToMuxResolution } from "@/lib/mux/client"
+import {
+  getPlaybackToken,
+  isMuxSigningConfigured,
+  planQualityToMuxResolution,
+} from "@/lib/mux/client"
 import { releaseDueVideos } from "@/lib/video-release"
 import { isVideoScheduled } from "@/lib/video-status"
 
@@ -99,6 +103,16 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
           availableAt: accessResult.availableAt,
         },
         { status: 403 }
+      )
+    }
+
+    if (!isMuxSigningConfigured()) {
+      return NextResponse.json(
+        {
+          error: "Video streaming is not configured in this environment",
+          code: "MUX_NOT_CONFIGURED",
+        },
+        { status: 503 }
       )
     }
 
