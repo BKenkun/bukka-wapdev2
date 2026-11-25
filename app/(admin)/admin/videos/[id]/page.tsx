@@ -6,6 +6,10 @@ import { IconArrowLeft, IconEye, IconTrash } from "@tabler/icons-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import {
+  getVideoDownloadOverride,
+  getVideoDownloadPolicy,
+} from "@/lib/get-video-download-policy"
 
 interface Props {
   params: Promise<{ id: string }>
@@ -14,7 +18,15 @@ interface Props {
 export default async function EditVideoPage({ params }: Props) {
   const { id } = await params
 
-  const [video, performers, categories, products, subscriptionPlans] = await Promise.all([
+  const [
+    video,
+    performers,
+    categories,
+    products,
+    subscriptionPlans,
+    globalDownloadPolicy,
+    initialDownloadOverride,
+  ] = await Promise.all([
     prisma.video.findUnique({
       where: { id },
       include: {
@@ -73,6 +85,8 @@ export default async function EditVideoPage({ params }: Props) {
       orderBy: { level: "asc" },
       select: { id: true, name: true, slug: true, level: true },
     }),
+    getVideoDownloadPolicy(),
+    getVideoDownloadOverride(id),
   ])
 
   if (!video) {
@@ -169,6 +183,8 @@ export default async function EditVideoPage({ params }: Props) {
         categories={categories}
         products={products.map(p => ({ ...p, price: Number(p.price) }))}
         subscriptionPlans={subscriptionPlans}
+        globalDownloadPolicy={globalDownloadPolicy}
+        initialDownloadOverride={initialDownloadOverride}
       />
     </div>
   )

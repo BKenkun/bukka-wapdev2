@@ -11,6 +11,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Separator } from "@/components/ui/separator"
 import { toast } from "sonner"
 import { LocalUploadButton } from "@/components/local-upload-button"
+import { SessionTimeoutSettingsCard } from "./session-timeout-settings"
 
 export function GeneralSettings() {
   const [isLoading, setIsLoading] = React.useState(false)
@@ -229,6 +230,9 @@ export function GeneralSettings() {
           Guardar Configuración
         </Button>
       </div>
+
+      {/* Global Session Inactivity Timeout */}
+      <SessionTimeoutSettingsCard />
     </div>
   )
 }

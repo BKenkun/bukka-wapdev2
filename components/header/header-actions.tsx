@@ -17,6 +17,10 @@ import { CartButton } from "@/components/cart/cart-button"
 import { SearchModal } from "@/components/search/search-modal"
 import { GuestMenuDropdown } from "./guest-menu-dropdown"
 import { useAuthModal } from "@/components/auth/auth-modal-provider"
+import {
+  clearStoredSessionActivity,
+  markSessionExpiredNotice,
+} from "@/lib/session-timeout"
 import type { GuestMenuData } from "@/lib/get-guest-menu"
 
 interface HeaderActionsProps {
@@ -78,6 +82,8 @@ export function HeaderActions({ guestMenu }: HeaderActionsProps) {
   }, [searchParams, router, openAuthModal])
 
   const handleSignOut = () => {
+    clearStoredSessionActivity()
+    markSessionExpiredNotice(null)
     signOut({ callbackUrl: "/" })
   }
 

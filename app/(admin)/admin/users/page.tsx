@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma"
 import { UsersDataTable } from "./users-data-table"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { IconUsers, IconUserPlus, IconCrown, IconDiamond } from "@tabler/icons-react"
+import { SessionTimeoutSettingsCard } from "@/app/(admin)/admin/settings/session-timeout-settings"
 
 interface SearchParams {
   page?: string
@@ -146,6 +147,10 @@ export default async function AdminUsersPage({
             <p className="text-2xl font-bold">{diamondUsers.toLocaleString()}</p>
           </CardContent>
         </Card>
+      </div>
+
+      <div className="mb-6">
+        <SessionTimeoutSettingsCard compact />
       </div>
 
       <div className="flex items-center justify-between mb-6">

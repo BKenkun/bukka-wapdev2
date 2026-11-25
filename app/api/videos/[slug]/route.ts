@@ -6,6 +6,7 @@ import { deleteMuxAsset } from "@/lib/mux/client"
 import { deleteLocalFile } from "@/lib/file-utils"
 import { releaseDueVideos } from "@/lib/video-release"
 import { isVideoNew, isVideoScheduled } from "@/lib/video-status"
+import { setVideoDownloadOverride } from "@/lib/get-video-download-policy"
 
 interface RouteParams {
   params: Promise<{ slug: string }>
@@ -65,6 +66,8 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
       muxUploadId,
       muxAssetId,
       muxPlaybackId,
+      // Optional per-video download schedule override
+      downloadOverride,
     } = body
 
     // Si se está reemplazando el video (nuevo muxAssetId), eliminar el asset antiguo de Mux
@@ -204,6 +207,10 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
         tags: { include: { tag: true } },
       },
     })
+
+    if (downloadOverride !== undefined) {
+      await setVideoDownloadOverride(video.id, downloadOverride)
+    }
 
     return NextResponse.json(video)
   } catch (error) {

@@ -3,6 +3,10 @@
 import { useState, useEffect } from "react"
 import { toast } from "sonner"
 import { useRouter } from "next/navigation"
+import {
+  formatDownloadUnlockDate,
+  type VideoDownloadAvailabilityReason,
+} from "@/lib/video-download-policy"
 
 interface VideoInfoBarProps {
   title: string
@@ -13,6 +17,9 @@ interface VideoInfoBarProps {
   videoSlug: string
   videoId?: string
   canDownload?: boolean
+  downloadAvailable?: boolean
+  downloadAvailableAt?: string | null
+  downloadBlockReason?: VideoDownloadAvailabilityReason
   userId?: string | null
 }
 
@@ -36,7 +43,20 @@ function WaterDropIcon({ className, filled = false }: { className?: string; fill
   )
 }
 
-export function VideoInfoBar({ title, subscriberCount, likePercentage, commentCount, viewCount, videoSlug, videoId, canDownload = false, userId }: VideoInfoBarProps) {
+export function VideoInfoBar({
+  title,
+  subscriberCount,
+  likePercentage,
+  commentCount,
+  viewCount,
+  videoSlug,
+  videoId,
+  canDownload = false,
+  downloadAvailable = true,
+  downloadAvailableAt = null,
+  downloadBlockReason = "AVAILABLE",
+  userId,
+}: VideoInfoBarProps) {
   const router = useRouter()
   const [isDownloading, setIsDownloading] = useState(false)
   const [isFavorite, setIsFavorite] = useState(false)
@@ -108,9 +128,27 @@ export function VideoInfoBar({ title, subscriberCount, likePercentage, commentCo
     }
   }
 
+  const unlockDateLabel = downloadAvailableAt
+    ? formatDownloadUnlockDate(downloadAvailableAt, "en")
+    : null
+  const isEffectiveDownloadAllowed = canDownload && downloadAvailable
+
   async function handleDownload() {
     if (!canDownload) {
       toast.error("Your plan does not allow downloads. Upgrade your subscription to unlock this feature.")
+      return
+    }
+
+    if (!downloadAvailable) {
+      if (downloadBlockReason === "DISABLED") {
+        toast.info("Downloads are disabled for this video.")
+      } else {
+        toast.info(
+          unlockDateLabel
+            ? `Downloads for this video will unlock on ${unlockDateLabel}.`
+            : "Downloads are not available for this video yet."
+        )
+      }
       return
     }
 
@@ -123,8 +161,13 @@ export function VideoInfoBar({ title, subscriberCount, likePercentage, commentCo
         throw new Error(data.error || "Error downloading")
       }
 
-      // Abrir URL de descarga en nueva pestaña
-      window.open(data.downloadUrl, "_blank")
+      const link = document.createElement("a")
+      link.href = data.downloadUrl
+      link.rel = "noopener noreferrer"
+      link.download = data.filename || `${videoSlug}.mp4`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
       toast.success("Download started")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Error downloading")
@@ -161,16 +204,28 @@ export function VideoInfoBar({ title, subscriberCount, likePercentage, commentCo
                 onClick={handleDownload}
                 disabled={isDownloading}
                 className={`flex items-center justify-center gap-5 px-6 py-2 font-normal text-base leading-6 transition-colors ${
-                  canDownload
+                  isEffectiveDownloadAllowed
                     ? "hover:opacity-90"
                     : "cursor-not-allowed"
                 }`}
                 style={{
                   minWidth: "140.55px",
-                  color: canDownload ? "var(--text-primary)" : "color-mix(in srgb, var(--text-primary) 50%, transparent)",
-                  background: canDownload ? "var(--accent-color)" : "color-mix(in srgb, var(--text-primary) 20%, transparent)",
+                  color: isEffectiveDownloadAllowed
+                    ? "var(--text-primary)"
+                    : "color-mix(in srgb, var(--text-primary) 50%, transparent)",
+                  background: isEffectiveDownloadAllowed
+                    ? "var(--accent-color)"
+                    : "color-mix(in srgb, var(--text-primary) 20%, transparent)",
                 }}
-                title={canDownload ? "Download video" : "Upgrade your plan to download"}
+                title={
+                  !canDownload
+                    ? "Upgrade your plan to download"
+                    : !downloadAvailable
+                      ? unlockDateLabel
+                        ? `Download available on ${unlockDateLabel}`
+                        : "Download not available yet"
+                      : "Download video"
+                }
               >
                 {isDownloading ? (
                   <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -185,7 +240,11 @@ export function VideoInfoBar({ title, subscriberCount, likePercentage, commentCo
                     />
                   </svg>
                 )}
-                {isDownloading ? "Downloading..." : "Download"}
+                {isDownloading
+                  ? "Downloading..."
+                  : !downloadAvailable && unlockDateLabel
+                    ? `Available ${unlockDateLabel}`
+                    : "Download"}
               </button>
             </div>
           </div>

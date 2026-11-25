@@ -59,6 +59,16 @@ import {
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import * as UpChunk from "@mux/upchunk"
+import {
+  DEFAULT_VIDEO_DOWNLOAD_OVERRIDE,
+  DEFAULT_VIDEO_DOWNLOAD_POLICY,
+  addDelayToDate,
+  formatDownloadDelayLabel,
+  formatDownloadUnlockDate,
+  type VideoDownloadOverride,
+  type VideoDownloadOverrideMode,
+  type VideoDownloadPolicy,
+} from "@/lib/video-download-policy"
 
 const videoSchema = z.object({
   title: z.string().min(1, "El título es requerido"),
@@ -146,9 +156,19 @@ interface VideoFormProps {
   categories: Category[]
   products: Product[]
   subscriptionPlans: SubscriptionPlan[]
+  globalDownloadPolicy?: VideoDownloadPolicy
+  initialDownloadOverride?: VideoDownloadOverride
 }
 
-export function VideoForm({ video, performers, categories, products, subscriptionPlans }: VideoFormProps) {
+export function VideoForm({
+  video,
+  performers,
+  categories,
+  products,
+  subscriptionPlans,
+  globalDownloadPolicy = DEFAULT_VIDEO_DOWNLOAD_POLICY,
+  initialDownloadOverride = DEFAULT_VIDEO_DOWNLOAD_OVERRIDE,
+}: VideoFormProps) {
   const router = useRouter()
   const [isSubmitting, setIsSubmitting] = React.useState(false)
   const [selectedPerformers, setSelectedPerformers] = React.useState<string[]>(
@@ -193,6 +213,18 @@ export function VideoForm({ video, performers, categories, products, subscriptio
   const [isUploadingPreview, setIsUploadingPreview] = React.useState(false)
   const [isUploading, setIsUploading] = React.useState(false)
   const previewInputRef = React.useRef<HTMLInputElement>(null)
+
+  // Per-video download schedule override
+  const [downloadMode, setDownloadMode] = React.useState<VideoDownloadOverrideMode>(
+    initialDownloadOverride?.mode || "default"
+  )
+  const [downloadCustomDate, setDownloadCustomDate] = React.useState<string>(() => {
+    if (!initialDownloadOverride?.availableAt) return ""
+    const d = new Date(initialDownloadOverride.availableAt)
+    if (Number.isNaN(d.getTime())) return ""
+    const pad = (n: number) => String(n).padStart(2, "0")
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  })
 
 
   // Local upload function for thumbnails
@@ -320,10 +352,25 @@ export function VideoForm({ video, performers, categories, products, subscriptio
   })
 
   const watchTitle = watch("title")
+  const watchReleaseDate = watch("releaseDate")
   const watchIsDiamondExclusive = watch("isDiamondExclusive")
   const watchIsLimitedEdition = watch("isLimitedEdition")
   const watchPreviewStartTime = watch("previewStartTime")
   const watchPreviewEndTime = watch("previewEndTime")
+
+  const calculatedGlobalDownloadDate = React.useMemo(() => {
+    if (!globalDownloadPolicy.enabled || globalDownloadPolicy.delayValue <= 0) {
+      return null
+    }
+    const base = watchReleaseDate ? new Date(watchReleaseDate) : new Date()
+    if (Number.isNaN(base.getTime())) return null
+    const unlockDate = addDelayToDate(
+      base,
+      globalDownloadPolicy.delayValue,
+      globalDownloadPolicy.delayUnit
+    )
+    return formatDownloadUnlockDate(unlockDate, "es")
+  }, [watchReleaseDate, globalDownloadPolicy])
 
   // Check Mux asset status
   const checkMuxAssetStatus = React.useCallback(async () => {
@@ -731,6 +778,17 @@ export function VideoForm({ video, performers, categories, products, subscriptio
         muxUploadId: videoUploadId || video?.muxUploadId || null,
         muxAssetId: muxAssetId || video?.muxAssetId || null,
         muxPlaybackId: muxPlaybackId || video?.muxPlaybackId || null,
+        // Include per-video download schedule override
+        downloadOverride: {
+          mode: downloadMode,
+          availableAt:
+            downloadMode === "custom_date" && downloadCustomDate
+              ? (() => {
+                  const parsed = new Date(downloadCustomDate)
+                  return !Number.isNaN(parsed.getTime()) ? parsed.toISOString() : null
+                })()
+              : null,
+        },
       }
 
       const url = video
@@ -1387,6 +1445,64 @@ export function VideoForm({ video, performers, categories, products, subscriptio
                   />
                 </div>
               )}
+
+              <Separator />
+
+              <div className="space-y-2">
+                <Label htmlFor="downloadMode">Disponibilidad de descarga</Label>
+                <Select
+                  value={downloadMode}
+                  onValueChange={(value) =>
+                    setDownloadMode(value as VideoDownloadOverrideMode)
+                  }
+                >
+                  <SelectTrigger id="downloadMode">
+                    <SelectValue placeholder="Selecciona disponibilidad" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="default">
+                      Regla global ({formatDownloadDelayLabel(globalDownloadPolicy, "es")})
+                    </SelectItem>
+                    <SelectItem value="custom_date">Fecha personalizada</SelectItem>
+                    <SelectItem value="immediate">Disponible de inmediato</SelectItem>
+                    <SelectItem value="disabled">Deshabilitar descarga</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                {downloadMode === "default" && (
+                  <p className="text-xs text-muted-foreground">
+                    {calculatedGlobalDownloadDate
+                      ? `Según la regla global, este vídeo se podrá descargar a partir del ${calculatedGlobalDownloadDate}.`
+                      : "Según la regla global actual, este vídeo será descargable en cuanto se publique."}
+                  </p>
+                )}
+
+                {downloadMode === "custom_date" && (
+                  <div className="space-y-1.5 pt-1">
+                    <Label htmlFor="downloadCustomDate" className="text-xs">
+                      Permitir descarga a partir de
+                    </Label>
+                    <Input
+                      id="downloadCustomDate"
+                      type="datetime-local"
+                      value={downloadCustomDate}
+                      onChange={(e) => setDownloadCustomDate(e.target.value)}
+                    />
+                  </div>
+                )}
+
+                {downloadMode === "immediate" && (
+                  <p className="text-xs text-muted-foreground">
+                    Los suscriptores con permiso podrán descargarlo desde el primer momento tras su publicación.
+                  </p>
+                )}
+
+                {downloadMode === "disabled" && (
+                  <p className="text-xs text-muted-foreground">
+                    Nadie podrá descargar este vídeo, independientemente de su plan o fecha.
+                  </p>
+                )}
+              </div>
             </CardContent>
           </Card>
 

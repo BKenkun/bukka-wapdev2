@@ -5,6 +5,14 @@ import { checkVideoAccess } from "@/lib/subscription-guard"
 import { getVideoToken, getMuxAsset } from "@/lib/mux/client"
 import { releaseDueVideos } from "@/lib/video-release"
 import { isVideoScheduled } from "@/lib/video-status"
+import {
+  getVideoDownloadOverride,
+  getVideoDownloadPolicy,
+} from "@/lib/get-video-download-policy"
+import {
+  evaluateVideoDownloadAvailability,
+  formatDownloadUnlockDate,
+} from "@/lib/video-download-policy"
 
 interface RouteParams {
   params: Promise<{ slug: string }>
@@ -121,6 +129,44 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
           error: "You do not have access to this video",
           reason: accessResult.reason,
           requiredPlanName: accessResult.requiredPlanName,
+        },
+        { status: 403 }
+      )
+    }
+
+    // Enforce global download waiting period (default: 3 months) and per-video download schedule
+    const [downloadPolicy, downloadOverride] = await Promise.all([
+      getVideoDownloadPolicy(),
+      getVideoDownloadOverride(video.id),
+    ])
+
+    const downloadAvailability = evaluateVideoDownloadAvailability({
+      releaseDate: video.releaseDate,
+      publishedAt: video.publishedAt,
+      createdAt: video.createdAt,
+      policy: downloadPolicy,
+      override: downloadOverride,
+      now: nowMs,
+    })
+
+    if (!downloadAvailability.isAvailable) {
+      const unlockLabel = downloadAvailability.availableAt
+        ? formatDownloadUnlockDate(downloadAvailability.availableAt, "en")
+        : null
+
+      const message =
+        downloadAvailability.reason === "DISABLED"
+          ? "Downloads are disabled for this video"
+          : unlockLabel
+            ? `Downloads for this video will be available on ${unlockLabel}`
+            : "Downloads are not available for this video yet"
+
+      return NextResponse.json(
+        {
+          error: message,
+          reason: downloadAvailability.reason,
+          downloadAvailableAt: downloadAvailability.availableAt?.toISOString() ?? null,
+          daysRemaining: downloadAvailability.daysRemaining,
         },
         { status: 403 }
       )

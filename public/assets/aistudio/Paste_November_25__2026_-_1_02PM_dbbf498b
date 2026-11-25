@@ -1,0 +1,801 @@
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import {
+  User,
+  signInWithPopup,
+  signOut,
+  onAuthStateChanged,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  updateProfile,
+  sendPasswordResetEmail,
+  sendEmailVerification,
+  getAdditionalUserInfo
+} from 'firebase/auth';
+import { doc, setDoc, onSnapshot, updateDoc } from 'firebase/firestore';
+import { auth, db, googleProvider } from '../lib/firebase';
+import { UserProfile, UserRole, SavedAddress } from '../types';
+import { sanitizeFirestoreData } from '../lib/firebase';
+import {
+  SESSION_STORAGE_KEYS,
+  SESSION_WARNING_WINDOW_SECONDS,
+  clampSessionTimeoutMinutes,
+  clearStoredSessionActivity,
+  isSessionExpiredByInactivity,
+  markSessionExpiredNotice,
+  readCachedTimeoutMinutes,
+  readSessionExpiredNotice,
+  readStoredLastActivity,
+  writeCachedTimeoutMinutes,
+  writeStoredLastActivity
+} from '../lib/sessionTimeout';
+
+export interface AuthContextType {
+  user: User | null;
+  userProfile: UserProfile | null;
+  loading: boolean;
+  isAdmin: boolean;
+  isModerator: boolean;
+  isCreator: boolean;
+  creatorModelId: string | null;
+  canAccessAdminPanel: boolean;
+  loginWithGoogle: () => Promise<User>;
+  loginWithEmail: (email: string, password: string) => Promise<User>;
+  registerWithEmail: (
+    email: string,
+    password: string,
+    displayName: string,
+    extraData?: { phoneNumber?: string; addresses?: SavedAddress[] }
+  ) => Promise<User>;
+  sendPasswordReset: (email: string) => Promise<void>;
+  sendVerificationEmail: () => Promise<{ mode: 'mailjet' | 'firebase' }>;
+  logout: () => Promise<void>;
+  updateUserProfile: (
+    data: Partial<
+      Pick<
+        UserProfile,
+        | 'phoneNumber'
+        | 'displayName'
+        | 'photoURL'
+        | 'addresses'
+        | 'loyaltyPoints'
+        | 'favoriteProductIds'
+        | 'favoriteModelIds'
+      >
+    >
+  ) => Promise<void>;
+  toggleFavoriteModel: (modelId: string) => Promise<void>;
+  isAuthModalOpen: boolean;
+  setIsAuthModalOpen: (open: boolean) => void;
+  isAccountModalOpen: boolean;
+  setIsAccountModalOpen: (open: boolean) => void;
+  sessionTimeoutMinutes: number;
+  updateSessionTimeoutMinutes: (minutes: number) => Promise<void>;
+  sessionWarningSecondsLeft: number | null;
+  sessionExpiredByInactivity: boolean;
+  dismissSessionExpiredNotice: () => void;
+  extendSession: () => void;
+}
+
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [user, setUser] = useState<User | null>(null);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [isAdmin, setIsAdmin] = useState<boolean>(false);
+  const [isModerator, setIsModerator] = useState<boolean>(false);
+  const [isCreator, setIsCreator] = useState<boolean>(false);
+  const [creatorModelId, setCreatorModelId] = useState<string | null>(null);
+  const [canAccessAdminPanel, setCanAccessAdminPanel] = useState<boolean>(false);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
+  const [isAccountModalOpen, setIsAccountModalOpen] = useState<boolean>(false);
+  const [sessionTimeoutMinutes, setSessionTimeoutMinutes] = useState<number>(() =>
+    readCachedTimeoutMinutes()
+  );
+  const [sessionWarningSecondsLeft, setSessionWarningSecondsLeft] = useState<number | null>(null);
+  const [sessionExpiredByInactivity, setSessionExpiredByInactivity] = useState<boolean>(() =>
+    readSessionExpiredNotice()
+  );
+  const registeringUidRef = useRef<string | null>(null);
+  const timeoutMinutesRef = useRef<number>(sessionTimeoutMinutes);
+  const warningActiveRef = useRef<boolean>(false);
+  const isLoggingOutForInactivityRef = useRef<boolean>(false);
+  const lastThrottleWriteRef = useRef<number>(0);
+
+  useEffect(() => {
+    timeoutMinutesRef.current = sessionTimeoutMinutes;
+  }, [sessionTimeoutMinutes]);
+
+  useEffect(() => {
+    warningActiveRef.current = sessionWarningSecondsLeft !== null;
+  }, [sessionWarningSecondsLeft]);
+
+  // Listen to global inactivity policy in appSettings/site (publicly readable, admin-writable)
+  useEffect(() => {
+    const siteSettingsRef = doc(db, 'appSettings', 'site');
+    const unsubscribeSite = onSnapshot(
+      siteSettingsRef,
+      (snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          if (data && data.sessionTimeoutMinutes !== undefined) {
+            const nextMinutes = clampSessionTimeoutMinutes(data.sessionTimeoutMinutes);
+            setSessionTimeoutMinutes(nextMinutes);
+            writeCachedTimeoutMinutes(nextMinutes);
+          }
+        }
+      },
+      (err) => {
+        // Non-fatal: falls back cleanly to cached/default timeout
+        console.warn('Could not subscribe to appSettings/site:', err);
+      }
+    );
+    return () => unsubscribeSite();
+  }, []);
+
+  const performInactivityLogout = useCallback(async () => {
+    if (isLoggingOutForInactivityRef.current) return;
+    isLoggingOutForInactivityRef.current = true;
+    try {
+      clearStoredSessionActivity();
+      markSessionExpiredNotice('inactivity');
+      setSessionWarningSecondsLeft(null);
+      setSessionExpiredByInactivity(true);
+      setIsAccountModalOpen(false);
+      await signOut(auth);
+      setUser(null);
+      setUserProfile(null);
+      setIsAdmin(false);
+      setIsModerator(false);
+      setIsCreator(false);
+      setCreatorModelId(null);
+      setCanAccessAdminPanel(false);
+    } catch (err) {
+      console.error('Error closing inactive session:', err);
+    } finally {
+      isLoggingOutForInactivityRef.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    let unsubscribeProfileListener: (() => void) | null = null;
+
+    const unsubscribeAuth = onAuthStateChanged(auth, async (currentUser) => {
+      if (unsubscribeProfileListener) {
+        unsubscribeProfileListener();
+        unsubscribeProfileListener = null;
+      }
+
+      if (!currentUser) {
+        setUser(null);
+        setUserProfile(null);
+        setIsAdmin(false);
+        setIsModerator(false);
+        setIsCreator(false);
+        setCreatorModelId(null);
+        setCanAccessAdminPanel(false);
+        setSessionWarningSecondsLeft(null);
+        setLoading(false);
+        return;
+      }
+
+      // Enforce wall-clock inactivity expiration before restoring persisted session
+      const timeoutMs = timeoutMinutesRef.current * 60 * 1000;
+      const expiredOnRestore = isSessionExpiredByInactivity(
+        currentUser.uid,
+        timeoutMs,
+        currentUser.metadata?.lastSignInTime
+      );
+
+      if (expiredOnRestore) {
+        await performInactivityLogout();
+        setLoading(false);
+        return;
+      }
+
+      // Ensure active session has an activity timestamp initialized
+      if (readStoredLastActivity(currentUser.uid) === null) {
+        writeStoredLastActivity(currentUser.uid, Date.now());
+      }
+      markSessionExpiredNotice(null);
+      setSessionExpiredByInactivity(false);
+      setUser(currentUser);
+
+      try {
+        const userDocRef = doc(db, 'users', currentUser.uid);
+        const isBootstrappedAdmin =
+          currentUser.email?.toLowerCase() === 'enriqueespincosme@gmail.com';
+
+        // Listen in real time to the user profile and role stored on the server (Firestore)
+        unsubscribeProfileListener = onSnapshot(
+          userDocRef,
+          async (snapshot) => {
+            if (snapshot.exists()) {
+              const profileData = snapshot.data() as UserProfile;
+              setUserProfile(profileData);
+              const effectiveRole: UserRole = isBootstrappedAdmin
+                ? 'admin'
+                : profileData.role || 'customer';
+              const hasAdminRole = effectiveRole === 'admin';
+              const hasModRole = effectiveRole === 'moderator';
+              const hasCreatorRole =
+                effectiveRole === 'creator' || Boolean(profileData.creatorModelId);
+
+              setIsAdmin(hasAdminRole);
+              setIsModerator(hasModRole);
+              setIsCreator(hasCreatorRole);
+              setCreatorModelId(profileData.creatorModelId || null);
+              setCanAccessAdminPanel(hasAdminRole || hasModRole);
+            } else {
+              // Skip auto-creating blank profile if registerWithEmail is currently writing full profile
+              if (registeringUidRef.current === currentUser.uid) {
+                setLoading(false);
+                return;
+              }
+              // Newly registered user: default role is customer, unless bootstrapped admin
+              const initialRole: UserRole = isBootstrappedAdmin ? 'admin' : 'customer';
+              const defaultUserProfile: UserProfile = {
+                id: currentUser.uid,
+                email: currentUser.email || '',
+                displayName: currentUser.displayName || 'Cliente',
+                photoURL: currentUser.photoURL || '',
+                role: initialRole,
+                phoneNumber: '',
+                addresses: [],
+                loyaltyPoints: 0,
+                favoriteProductIds: [],
+                favoriteModelIds: [],
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString()
+              };
+
+              try {
+                await setDoc(userDocRef, sanitizeFirestoreData(defaultUserProfile), { merge: true });
+                setUserProfile(defaultUserProfile);
+                const isInitialAdmin = initialRole === 'admin';
+                setIsAdmin(isInitialAdmin);
+                setIsModerator(false);
+                setIsCreator(false);
+                setCreatorModelId(null);
+                setCanAccessAdminPanel(isInitialAdmin);
+              } catch (writeError) {
+                console.warn('Could not initialize user profile in Firestore:', writeError);
+                setUserProfile(defaultUserProfile);
+                const isInitialAdmin = initialRole === 'admin';
+                setIsAdmin(isInitialAdmin);
+                setIsModerator(false);
+                setIsCreator(false);
+                setCreatorModelId(null);
+                setCanAccessAdminPanel(isInitialAdmin);
+              }
+            }
+            setLoading(false);
+          },
+          (error) => {
+            console.warn('Error fetching user profile from Firestore:', error);
+            if (isBootstrappedAdmin) {
+              setIsAdmin(true);
+              setIsModerator(false);
+              setCanAccessAdminPanel(true);
+            } else {
+              setIsAdmin(false);
+              setIsModerator(false);
+              setCanAccessAdminPanel(false);
+            }
+            setLoading(false);
+          }
+        );
+      } catch (err) {
+        console.error('Error in user profile subscription:', err);
+        setIsAdmin(false);
+        setIsModerator(false);
+        setCanAccessAdminPanel(false);
+        setLoading(false);
+      }
+    });
+
+    return () => {
+      unsubscribeAuth();
+      if (unsubscribeProfileListener) {
+        unsubscribeProfileListener();
+      }
+    };
+  }, [performInactivityLogout]);
+
+  // Real-time inactivity clock + multi-tab synchronization + wake-from-sleep verification
+  useEffect(() => {
+    if (!user) {
+      setSessionWarningSecondsLeft(null);
+      return;
+    }
+
+    const uid = user.uid;
+
+    const getTimeoutAndWarningMs = () => {
+      const timeoutMs = timeoutMinutesRef.current * 60 * 1000;
+      const warningMs = Math.min(SESSION_WARNING_WINDOW_SECONDS * 1000, Math.floor(timeoutMs * 0.25));
+      return { timeoutMs, warningMs };
+    };
+
+    const evaluateClock = () => {
+      const { timeoutMs, warningMs } = getTimeoutAndWarningMs();
+      const lastActivity = readStoredLastActivity(uid);
+      if (lastActivity === null) {
+        writeStoredLastActivity(uid, Date.now());
+        setSessionWarningSecondsLeft(null);
+        return;
+      }
+
+      const elapsed = Date.now() - lastActivity;
+      const remaining = timeoutMs - elapsed;
+
+      if (remaining <= 0) {
+        void performInactivityLogout();
+        return;
+      }
+
+      if (remaining <= warningMs) {
+        setSessionWarningSecondsLeft(Math.max(1, Math.ceil(remaining / 1000)));
+      } else if (warningActiveRef.current) {
+        setSessionWarningSecondsLeft(null);
+      }
+    };
+
+    const recordUserActivity = () => {
+      // Once the final warning dialog is shown, require explicit confirmation instead of passive hover
+      if (warningActiveRef.current) return;
+
+      const now = Date.now();
+      const { timeoutMs } = getTimeoutAndWarningMs();
+      const existing = readStoredLastActivity(uid);
+
+      // If the device just woke up from sleep or an idle period already past deadline, log out immediately
+      if (existing !== null && now - existing >= timeoutMs) {
+        void performInactivityLogout();
+        return;
+      }
+
+      if (now - lastThrottleWriteRef.current >= 2000) {
+        lastThrottleWriteRef.current = now;
+        writeStoredLastActivity(uid, now);
+      }
+    };
+
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'hidden') return;
+      // Always evaluate elapsed wall-clock time BEFORE recording new activity
+      const { timeoutMs } = getTimeoutAndWarningMs();
+      const existing = readStoredLastActivity(uid);
+      if (existing !== null && Date.now() - existing >= timeoutMs) {
+        void performInactivityLogout();
+        return;
+      }
+      evaluateClock();
+    };
+
+    const handleStorageSync = (e: StorageEvent) => {
+      if (e.key === SESSION_STORAGE_KEYS.EXPIRED_REASON && e.newValue === 'inactivity') {
+        void performInactivityLogout();
+        return;
+      }
+      if (e.key === SESSION_STORAGE_KEYS.LAST_ACTIVITY_AT) {
+        if (!e.newValue) {
+          setSessionWarningSecondsLeft(null);
+        } else {
+          evaluateClock();
+        }
+      }
+    };
+
+    const activityEvents: (keyof WindowEventMap)[] = [
+      'mousemove',
+      'mousedown',
+      'keydown',
+      'scroll',
+      'touchstart',
+      'pointerdown',
+      'click'
+    ];
+
+    activityEvents.forEach((evt) => window.addEventListener(evt, recordUserActivity, { passive: true }));
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+    window.addEventListener('storage', handleStorageSync);
+
+    evaluateClock();
+    const intervalId = window.setInterval(evaluateClock, 1000);
+
+    return () => {
+      window.clearInterval(intervalId);
+      activityEvents.forEach((evt) => window.removeEventListener(evt, recordUserActivity));
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+      window.removeEventListener('storage', handleStorageSync);
+    };
+  }, [user, sessionTimeoutMinutes, performInactivityLogout]);
+
+  const extendSession = useCallback(() => {
+    if (!user) return;
+    const now = Date.now();
+    lastThrottleWriteRef.current = now;
+    writeStoredLastActivity(user.uid, now);
+    setSessionWarningSecondsLeft(null);
+  }, [user]);
+
+  const dismissSessionExpiredNotice = useCallback(() => {
+    markSessionExpiredNotice(null);
+    setSessionExpiredByInactivity(false);
+  }, []);
+
+  const updateSessionTimeoutMinutes = useCallback(
+    async (minutes: number) => {
+      const clamped = clampSessionTimeoutMinutes(minutes);
+      await setDoc(
+        doc(db, 'appSettings', 'site'),
+        sanitizeFirestoreData({
+          id: 'site',
+          sessionTimeoutMinutes: clamped,
+          updatedAt: new Date().toISOString(),
+          updatedBy: auth.currentUser?.email || user?.email || 'admin'
+        }),
+        { merge: true }
+      );
+      setSessionTimeoutMinutes(clamped);
+      writeCachedTimeoutMinutes(clamped);
+      // Reset active admin clock cleanly when policy is tightened so they don't immediately kick themselves out
+      if (auth.currentUser) {
+        const now = Date.now();
+        lastThrottleWriteRef.current = now;
+        writeStoredLastActivity(auth.currentUser.uid, now);
+      }
+      setSessionWarningSecondsLeft(null);
+    },
+    [user]
+  );
+
+  const dispatchAuthLifecycleEmails = useCallback(
+    async (
+      targetUser: User,
+      opts: {
+        sendVerification?: boolean;
+        sendWelcome?: boolean;
+        sendPasswordChanged?: boolean;
+        recipientName?: string;
+      }
+    ): Promise<{ fallbackVerificationToClient: boolean; verificationMode?: string }> => {
+      try {
+        const idToken = await targetUser.getIdToken();
+        const resp = await fetch('/api/auth/dispatch-lifecycle-emails', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${idToken}`
+          },
+          body: JSON.stringify({
+            ...opts,
+            origin: typeof window !== 'undefined' ? window.location.origin : undefined
+          })
+        });
+        if (!resp.ok) {
+          return { fallbackVerificationToClient: Boolean(opts.sendVerification) };
+        }
+        const payload = await resp.json().catch(() => null);
+        return {
+          fallbackVerificationToClient: Boolean(payload?.fallbackVerificationToClient),
+          verificationMode: payload?.verificationMode
+        };
+      } catch {
+        return { fallbackVerificationToClient: Boolean(opts.sendVerification) };
+      }
+    },
+    []
+  );
+
+  const loginWithGoogle = async (): Promise<User> => {
+    clearStoredSessionActivity();
+    markSessionExpiredNotice(null);
+    setSessionExpiredByInactivity(false);
+    try {
+      const cred = await signInWithPopup(auth, googleProvider);
+      writeStoredLastActivity(cred.user.uid, Date.now());
+      const additionalInfo = getAdditionalUserInfo(cred);
+      if (additionalInfo?.isNewUser) {
+        void dispatchAuthLifecycleEmails(cred.user, {
+          sendWelcome: true,
+          recipientName: cred.user.displayName || undefined
+        });
+      }
+      setIsAuthModalOpen(false);
+      return cred.user;
+    } catch (error) {
+      console.error('Google Sign-In error:', error);
+      throw error;
+    }
+  };
+
+  const loginWithEmail = async (email: string, password: string): Promise<User> => {
+    clearStoredSessionActivity();
+    markSessionExpiredNotice(null);
+    setSessionExpiredByInactivity(false);
+    try {
+      const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
+      writeStoredLastActivity(cred.user.uid, Date.now());
+      setIsAuthModalOpen(false);
+      return cred.user;
+    } catch (error) {
+      console.error('Email Sign-In error:', error);
+      throw error;
+    }
+  };
+
+  const registerWithEmail = async (
+    email: string,
+    password: string,
+    displayName: string,
+    extraData?: { phoneNumber?: string; addresses?: SavedAddress[] }
+  ): Promise<User> => {
+    clearStoredSessionActivity();
+    markSessionExpiredNotice(null);
+    setSessionExpiredByInactivity(false);
+    try {
+      const trimmedEmail = email.trim();
+      const trimmedName = displayName.trim() || trimmedEmail.split('@')[0];
+      const userCredential = await createUserWithEmailAndPassword(auth, trimmedEmail, password);
+      const registeredUser = userCredential.user;
+      writeStoredLastActivity(registeredUser.uid, Date.now());
+      registeringUidRef.current = registeredUser.uid;
+
+      try {
+        await updateProfile(registeredUser, { displayName: trimmedName });
+      } catch (profileErr) {
+        console.warn('Could not update profile displayName:', profileErr);
+      }
+
+      const isBootstrappedAdmin = trimmedEmail.toLowerCase() === 'enriqueespincosme@gmail.com';
+      const assignedRole: UserRole = isBootstrappedAdmin ? 'admin' : 'customer';
+
+      // Initialize customer profile in Firestore with optional checkout shipping details
+      const defaultCustomerProfile: UserProfile = {
+        id: registeredUser.uid,
+        email: registeredUser.email || trimmedEmail,
+        displayName: trimmedName,
+        photoURL: '',
+        role: assignedRole,
+        phoneNumber: extraData?.phoneNumber || '',
+        addresses: extraData?.addresses || [],
+        loyaltyPoints: 0,
+        favoriteProductIds: [],
+        favoriteModelIds: [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+
+      try {
+        await setDoc(
+          doc(db, 'users', registeredUser.uid),
+          sanitizeFirestoreData(defaultCustomerProfile),
+          { merge: true }
+        );
+        setUserProfile(defaultCustomerProfile);
+        setIsAdmin(assignedRole === 'admin');
+        setIsModerator(false);
+        setCanAccessAdminPanel(assignedRole === 'admin');
+      } catch (writeError) {
+        console.warn('Could not initialize user profile in Firestore:', writeError);
+        setUserProfile(defaultCustomerProfile);
+        setIsAdmin(assignedRole === 'admin');
+        setIsModerator(false);
+        setCanAccessAdminPanel(assignedRole === 'admin');
+      } finally {
+        registeringUidRef.current = null;
+      }
+
+      void (async () => {
+        const lifecycle = await dispatchAuthLifecycleEmails(registeredUser, {
+          sendVerification: true,
+          sendWelcome: true,
+          recipientName: trimmedName
+        });
+        if (lifecycle.fallbackVerificationToClient) {
+          try {
+            await sendEmailVerification(registeredUser);
+          } catch (verifyErr) {
+            console.warn('Could not trigger Firebase verification fallback:', verifyErr);
+          }
+        }
+      })();
+
+      setIsAuthModalOpen(false);
+      return registeredUser;
+    } catch (error) {
+      registeringUidRef.current = null;
+      console.error('Email Registration error:', error);
+      throw error;
+    }
+  };
+
+  const sendPasswordReset = async (email: string) => {
+    const cleanEmail = email.trim();
+    try {
+      const resp = await fetch('/api/auth/send-password-reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: cleanEmail,
+          origin: typeof window !== 'undefined' ? window.location.origin : undefined
+        })
+      });
+      const payload = await resp.json().catch(() => null);
+      if (resp.status === 429) {
+        throw new Error(
+          payload?.error || 'Demasiadas solicitudes de recuperación. Espera unos minutos.'
+        );
+      }
+      if (resp.ok && payload?.success && !payload?.fallbackToClient) {
+        return;
+      }
+    } catch (err: any) {
+      if (err?.message && err.message.includes('Demasiadas solicitudes')) {
+        throw err;
+      }
+    }
+
+    try {
+      await sendPasswordResetEmail(auth, cleanEmail);
+    } catch (error) {
+      console.error('Password reset error:', error);
+      throw error;
+    }
+  };
+
+  const sendVerificationEmail = useCallback(async (): Promise<{ mode: 'mailjet' | 'firebase' }> => {
+    const currentUser = auth.currentUser;
+    if (!currentUser) {
+      throw new Error('Debes iniciar sesión para verificar tu correo.');
+    }
+    const lifecycle = await dispatchAuthLifecycleEmails(currentUser, {
+      sendVerification: true,
+      recipientName: userProfile?.displayName || currentUser.displayName || undefined
+    });
+    if (lifecycle.fallbackVerificationToClient) {
+      await sendEmailVerification(currentUser);
+      return { mode: 'firebase' };
+    }
+    return { mode: 'mailjet' };
+  }, [dispatchAuthLifecycleEmails, userProfile?.displayName]);
+
+  const updateUserProfile = async (
+    data: Partial<
+      Pick<
+        UserProfile,
+        | 'phoneNumber'
+        | 'displayName'
+        | 'photoURL'
+        | 'addresses'
+        | 'loyaltyPoints'
+        | 'favoriteProductIds'
+        | 'favoriteModelIds'
+      >
+    >
+  ) => {
+    const activeUser = auth.currentUser || user;
+    if (!activeUser) return;
+    const userDocRef = doc(db, 'users', activeUser.uid);
+    const cleanUpdate = sanitizeFirestoreData({
+      ...data,
+      updatedAt: new Date().toISOString()
+    });
+    try {
+      await updateDoc(userDocRef, cleanUpdate);
+      setUserProfile((prev) => (prev ? { ...prev, ...cleanUpdate } : null));
+    } catch (err) {
+      // Fallback to setDoc merge if document was not yet persisted
+      try {
+        const isBootstrappedAdmin =
+          activeUser.email?.toLowerCase() === 'enriqueespincosme@gmail.com';
+        const fallbackRole: UserRole =
+          userProfile?.role || (isBootstrappedAdmin ? 'admin' : 'customer');
+        await setDoc(
+          userDocRef,
+          sanitizeFirestoreData({
+            id: activeUser.uid,
+            email: activeUser.email || '',
+            role: fallbackRole,
+            ...cleanUpdate
+          }),
+          { merge: true }
+        );
+        setUserProfile((prev) =>
+          prev
+            ? { ...prev, ...cleanUpdate }
+            : {
+                id: activeUser.uid,
+                email: activeUser.email || '',
+                displayName: data.displayName || activeUser.displayName || 'Cliente',
+                role: fallbackRole,
+                ...cleanUpdate
+              }
+        );
+      } catch (fallbackErr) {
+        console.error('Error updating user profile in Firestore:', fallbackErr);
+        throw fallbackErr;
+      }
+    }
+  };
+
+  const toggleFavoriteModel = async (modelId: string) => {
+    if (!user) {
+      setIsAuthModalOpen(true);
+      return;
+    }
+    const currentFavs = userProfile?.favoriteModelIds || [];
+    const nextFavs = currentFavs.includes(modelId)
+      ? currentFavs.filter((id) => id !== modelId)
+      : [...currentFavs, modelId];
+    await updateUserProfile({ favoriteModelIds: nextFavs });
+  };
+
+  const logout = async () => {
+    try {
+      clearStoredSessionActivity();
+      markSessionExpiredNotice(null);
+      setSessionWarningSecondsLeft(null);
+      setSessionExpiredByInactivity(false);
+      setIsAccountModalOpen(false);
+      await signOut(auth);
+      setUser(null);
+      setUserProfile(null);
+      setIsAdmin(false);
+      setIsModerator(false);
+      setIsCreator(false);
+      setCreatorModelId(null);
+      setCanAccessAdminPanel(false);
+    } catch (error) {
+      console.error('Logout error:', error);
+      throw error;
+    }
+  };
+
+  return (
+    <AuthContext.Provider
+      value={{
+        user,
+        userProfile,
+        loading,
+        isAdmin,
+        isModerator,
+        isCreator,
+        creatorModelId,
+        canAccessAdminPanel,
+        loginWithGoogle,
+        loginWithEmail,
+        registerWithEmail,
+        sendPasswordReset,
+        sendVerificationEmail,
+        logout,
+        updateUserProfile,
+        toggleFavoriteModel,
+        isAuthModalOpen,
+        setIsAuthModalOpen,
+        isAccountModalOpen,
+        setIsAccountModalOpen,
+        sessionTimeoutMinutes,
+        updateSessionTimeoutMinutes,
+        sessionWarningSecondsLeft,
+        sessionExpiredByInactivity,
+        dismissSessionExpiredNotice,
+        extendSession
+      }}
+    >
+      {children}
+    </AuthContext.Provider>
+  );
+};
+
+export const useAuth = () => {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error('useAuth must be used within an AuthProvider');
+  }
+  return context;
+};

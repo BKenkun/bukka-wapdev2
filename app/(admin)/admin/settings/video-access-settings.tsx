@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { IconLoader2, IconLock, IconEye } from "@tabler/icons-react"
-import { Lock } from "lucide-react"
+import { CalendarClock, Download, Lock, ShieldCheck } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -18,6 +18,17 @@ import {
 } from "@/components/ui/select"
 import { FileDropzone } from "@/components/ui/file-dropzone"
 import { toast } from "sonner"
+import {
+  DEFAULT_VIDEO_DOWNLOAD_POLICY,
+  DOWNLOAD_DELAY_PRESETS,
+  MAX_DOWNLOAD_DELAY_BY_UNIT,
+  addDelayToDate,
+  formatDownloadDelayLabel,
+  formatDownloadUnlockDate,
+  sanitizeVideoDownloadPolicy,
+  type DownloadDelayUnit,
+  type VideoDownloadPolicy,
+} from "@/lib/video-download-policy"
 
 interface LockScreenData {
   title: string
@@ -131,6 +142,9 @@ export function VideoAccessSettings() {
   const [isLoading, setIsLoading] = React.useState(true)
   const [isSaving, setIsSaving] = React.useState(false)
   const [data, setData] = React.useState<LockScreenData>(DEFAULT_DATA)
+  const [downloadPolicy, setDownloadPolicy] = React.useState<VideoDownloadPolicy>({
+    ...DEFAULT_VIDEO_DOWNLOAD_POLICY,
+  })
   const [isHovering, setIsHovering] = React.useState(false)
 
   React.useEffect(() => {
@@ -143,6 +157,9 @@ export function VideoAccessSettings() {
       if (response.ok) {
         const result = await response.json()
         setData({ ...DEFAULT_DATA, ...result.lockScreen })
+        if (result.downloadPolicy) {
+          setDownloadPolicy(sanitizeVideoDownloadPolicy(result.downloadPolicy))
+        }
       }
     } catch (error) {
       console.error("Error loading settings:", error)
@@ -154,16 +171,24 @@ export function VideoAccessSettings() {
   const handleSave = async () => {
     setIsSaving(true)
     try {
+      const sanitizedPolicy = sanitizeVideoDownloadPolicy(downloadPolicy)
       const response = await fetch("/api/admin/settings/video-access", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lockScreen: data }),
+        body: JSON.stringify({
+          lockScreen: data,
+          downloadPolicy: sanitizedPolicy,
+        }),
       })
 
       if (!response.ok) {
         throw new Error("Error al guardar")
       }
 
+      const result = await response.json()
+      if (result.downloadPolicy) {
+        setDownloadPolicy(sanitizeVideoDownloadPolicy(result.downloadPolicy))
+      }
       toast.success("Configuración guardada correctamente")
     } catch (error) {
       toast.error("Error al guardar la configuración")
@@ -179,6 +204,16 @@ export function VideoAccessSettings() {
     setData((prev) => ({ ...prev, [field]: value }))
   }
 
+  const exampleUnlockDate = React.useMemo(() => {
+    if (!downloadPolicy.enabled || downloadPolicy.delayValue <= 0) return null
+    const future = addDelayToDate(
+      new Date(),
+      downloadPolicy.delayValue,
+      downloadPolicy.delayUnit
+    )
+    return formatDownloadUnlockDate(future, "es")
+  }, [downloadPolicy])
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -189,6 +224,166 @@ export function VideoAccessSettings() {
 
   return (
     <div className="space-y-6">
+      {/* Programación de Descargas */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <CalendarClock className="size-5 text-primary" />
+            Programación de Descargas
+          </CardTitle>
+          <CardDescription>
+            Define cuánto tiempo debe pasar desde la fecha de publicación de un vídeo antes de
+            que los suscriptores con permiso de descarga puedan descargarlo. También puedes
+            personalizar la fecha de descarga en cada vídeo individualmente.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <div className="flex items-center justify-between gap-4">
+            <div className="space-y-0.5">
+              <Label htmlFor="downloadDelayEnabled" className="text-sm font-medium">
+                Bloquear descargas en vídeos recién publicados
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                Cuando está activo, nadie podrá descargar un vídeo hasta que transcurra el
+                periodo configurado desde su fecha de estreno.
+              </p>
+            </div>
+            <Switch
+              id="downloadDelayEnabled"
+              checked={downloadPolicy.enabled}
+              onCheckedChange={(checked) =>
+                setDownloadPolicy((prev) => ({
+                  ...prev,
+                  enabled: checked,
+                  delayValue: checked && prev.delayValue <= 0 ? 3 : prev.delayValue,
+                  delayUnit: checked && prev.delayValue <= 0 ? "months" : prev.delayUnit,
+                }))
+              }
+            />
+          </div>
+
+          {/* Presets rápidos */}
+          <div className="space-y-2">
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+              Periodos predefinidos
+            </Label>
+            <div className="flex flex-wrap gap-2">
+              {DOWNLOAD_DELAY_PRESETS.map((preset) => {
+                const isSelected =
+                  preset.enabled === downloadPolicy.enabled &&
+                  (!preset.enabled ||
+                    (preset.delayValue === downloadPolicy.delayValue &&
+                      preset.delayUnit === downloadPolicy.delayUnit))
+                return (
+                  <Button
+                    key={preset.label}
+                    type="button"
+                    size="sm"
+                    variant={isSelected ? "default" : "outline"}
+                    onClick={() =>
+                      setDownloadPolicy({
+                        enabled: preset.enabled,
+                        delayValue: preset.delayValue,
+                        delayUnit: preset.delayUnit,
+                      })
+                    }
+                  >
+                    {preset.label}
+                  </Button>
+                )
+              })}
+            </div>
+          </div>
+
+          {/* Periodo personalizado */}
+          {downloadPolicy.enabled && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="downloadDelayValue">Tiempo de espera</Label>
+                <Input
+                  id="downloadDelayValue"
+                  type="number"
+                  min={1}
+                  max={MAX_DOWNLOAD_DELAY_BY_UNIT[downloadPolicy.delayUnit]}
+                  value={downloadPolicy.delayValue}
+                  onChange={(e) => {
+                    const raw = Number(e.target.value)
+                    const max = MAX_DOWNLOAD_DELAY_BY_UNIT[downloadPolicy.delayUnit]
+                    setDownloadPolicy((prev) => ({
+                      ...prev,
+                      delayValue: Number.isFinite(raw)
+                        ? Math.min(max, Math.max(0, Math.round(raw)))
+                        : 0,
+                    }))
+                  }}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="downloadDelayUnit">Unidad de tiempo</Label>
+                <Select
+                  value={downloadPolicy.delayUnit}
+                  onValueChange={(value) => {
+                    const unit = value as DownloadDelayUnit
+                    const max = MAX_DOWNLOAD_DELAY_BY_UNIT[unit]
+                    setDownloadPolicy((prev) => ({
+                      ...prev,
+                      delayUnit: unit,
+                      delayValue: Math.min(max, prev.delayValue),
+                    }))
+                  }}
+                >
+                  <SelectTrigger id="downloadDelayUnit">
+                    <SelectValue placeholder="Selecciona unidad" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="days">Días</SelectItem>
+                    <SelectItem value="weeks">Semanas</SelectItem>
+                    <SelectItem value="months">Meses</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+          )}
+
+          {/* Resumen y ejemplo en vivo */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 rounded-md border bg-muted/40 px-4 py-3">
+            <div className="space-y-1 text-xs text-muted-foreground">
+              <p className="flex items-center gap-1.5 text-foreground font-medium">
+                {downloadPolicy.enabled && downloadPolicy.delayValue > 0 ? (
+                  <>
+                    <ShieldCheck className="size-4 text-emerald-500 shrink-0" />
+                    <span>
+                      Regla activa: descargas bloqueadas durante{" "}
+                      <strong>{formatDownloadDelayLabel(downloadPolicy, "es")}</strong> desde la
+                      publicación
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <Download className="size-4 text-amber-500 shrink-0" />
+                    <span>
+                      Regla activa: los vídeos son descargables inmediatamente tras publicarse
+                    </span>
+                  </>
+                )}
+              </p>
+              {exampleUnlockDate && (
+                <p>
+                  Ejemplo: un vídeo publicado hoy se podrá descargar a partir del{" "}
+                  <strong className="text-foreground">{exampleUnlockDate}</strong>.
+                </p>
+              )}
+            </div>
+
+            <Button onClick={handleSave} disabled={isSaving} size="sm" className="shrink-0">
+              {isSaving && <IconLoader2 className="mr-2 size-4 animate-spin" />}
+              Guardar Regla
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
       {/* Contenido del Overlay */}
       <Card>
         <CardHeader>

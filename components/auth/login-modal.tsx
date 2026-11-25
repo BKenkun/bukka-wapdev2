@@ -14,6 +14,10 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Loader2, Mail, ArrowLeft } from "lucide-react"
 import { getRecaptchaToken } from "@/lib/recaptcha-client"
+import {
+  clearStoredSessionActivity,
+  markSessionExpiredNotice,
+} from "@/lib/session-timeout"
 
 interface LoginModalProps {
   open: boolean
@@ -72,7 +76,7 @@ export function LoginModal({ open, onOpenChange, defaultView = "login", callback
 
     try {
       const result = await signIn("credentials", {
-        email: loginData.email,
+        email: loginData.email.trim(),
         password: loginData.password,
         redirect: false,
       })
@@ -89,6 +93,9 @@ export function LoginModal({ open, onOpenChange, defaultView = "login", callback
         return
       }
 
+      clearStoredSessionActivity()
+      markSessionExpiredNotice(null)
+      setIsLoading(false)
       onOpenChange(false)
       if (callbackUrl) {
         router.push(callbackUrl)

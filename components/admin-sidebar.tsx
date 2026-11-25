@@ -31,6 +31,10 @@ import {
   IconShare,
 } from "@tabler/icons-react"
 import { signOut } from "next-auth/react"
+import {
+  clearStoredSessionActivity,
+  markSessionExpiredNotice,
+} from "@/lib/session-timeout"
 
 import {
   Sidebar,
@@ -481,7 +485,11 @@ export function AdminSidebar({ user, ...props }: AdminSidebarProps) {
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
-                  onClick={() => signOut({ callbackUrl: "/admin/login" })}
+                  onClick={() => {
+                    clearStoredSessionActivity()
+                    markSessionExpiredNotice(null)
+                    signOut({ callbackUrl: "/admin/login" })
+                  }}
                   className="text-destructive cursor-pointer"
                 >
                   <IconLogout className="mr-2 size-4" />

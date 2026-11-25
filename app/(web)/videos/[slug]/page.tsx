@@ -9,6 +9,8 @@ import { VideoDetailLayout } from "@/components/video-detail-layout"
 import { MuxVideoPlayer } from "@/components/mux-video-player"
 import { VideoPlayer } from "@/components/video-player"
 import { getVideoAccessSettings } from "@/lib/get-video-access-settings"
+import { getVideoDownloadOverride } from "@/lib/get-video-download-policy"
+import { evaluateVideoDownloadAvailability } from "@/lib/video-download-policy"
 import { HomeSectionRenderer } from "@/components/home/home-section-renderer"
 import { VideoComingSoonView } from "@/components/video-coming-soon-view"
 import { VideosPageClient } from "../videos-page-client"
@@ -674,6 +676,14 @@ async function VideoDetailPage({ slug }: { slug: string }) {
   }
 
   const canDownload = userPlan?.canDownload ?? false
+  const downloadOverride = await getVideoDownloadOverride(video.id)
+  const downloadAvailability = evaluateVideoDownloadAvailability({
+    releaseDate: video.releaseDate,
+    publishedAt: video.publishedAt,
+    createdAt: video.createdAt,
+    policy: videoAccessSettings.downloadPolicy,
+    override: downloadOverride,
+  })
 
   const actresses = video.performers.map(({ performer }) => ({
     id: performer.id,
@@ -871,6 +881,9 @@ async function VideoDetailPage({ slug }: { slug: string }) {
                     videoSlug={video.slug}
                     userId={userId}
                     canDownload={canDownload && !isLocked}
+                    downloadAvailable={downloadAvailability.isAvailable}
+                    downloadAvailableAt={downloadAvailability.availableAt?.toISOString() ?? null}
+                    downloadBlockReason={downloadAvailability.reason}
                     favoriteCount={video._count.favorites}
                     viewCount={(video.viewCount + 1).toLocaleString()}
                   />

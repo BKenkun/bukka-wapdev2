@@ -32,6 +32,7 @@ declare module "next-auth" {
       adminRole: string | null
       SubscriptionPlan: SubscriptionPlanData | null
       subscriptionEnd: Date | null
+      signedInAt: number | null
     }
   }
   interface User {
@@ -49,6 +50,7 @@ declare module "next-auth/jwt" {
     adminRole?: string | null
     SubscriptionPlan?: SubscriptionPlanData | null
     subscriptionEnd?: Date | null
+    signedInAt?: number | null
   }
 }
 
@@ -80,6 +82,12 @@ export const authConfig: NextAuthConfig = {
             ? causeObj.err
             : undefined
       const causeMessage = causeErr?.message || error.message || ""
+
+      // Expected invalid credentials attempts throw CredentialsSignin inside Auth.js and are
+      // returned cleanly to the login UI via signIn() result.error — do not log as server crashes.
+      if (errorType === "CredentialsSignin") {
+        return
+      }
 
       // Stale or rotated session cookies fail JWT decryption cleanly (Auth.js returns null session).
       // Suppress expected decryption-mismatch noise so it does not spam server/browser error consoles.
@@ -155,6 +163,7 @@ export const authConfig: NextAuthConfig = {
         token.adminRole = user.adminRole
         token.SubscriptionPlan = user.SubscriptionPlan
         token.subscriptionEnd = user.subscriptionEnd
+        token.signedInAt = Date.now()
       }
       return token
     },
@@ -165,6 +174,7 @@ export const authConfig: NextAuthConfig = {
         session.user.adminRole = (token.adminRole as string | null) ?? null
         session.user.SubscriptionPlan = (token.SubscriptionPlan as SubscriptionPlanData | null) ?? null
         session.user.subscriptionEnd = (token.subscriptionEnd as Date | null) ?? null
+        session.user.signedInAt = (token.signedInAt as number | null) ?? null
       }
       return session
     },

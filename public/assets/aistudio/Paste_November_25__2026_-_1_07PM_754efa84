@@ -1,0 +1,1312 @@
+import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
+import {
+  collection,
+  doc,
+  setDoc,
+  getDocs,
+  deleteDoc,
+  updateDoc,
+  query,
+  where
+} from 'firebase/firestore';
+import { db, handleFirestoreError, OperationType, sanitizeFirestoreData } from '../lib/firebase';
+import { useAuth } from './AuthContext';
+import {
+  getProducts,
+  createProduct,
+  updateProduct as updateProductInDb,
+  deleteProduct as deleteProductFromDb
+} from '../services/productService';
+import { submitProductReview } from '../services/reviewService';
+import {
+  getUserWishlist,
+  saveUserWishlist,
+  subscribeToUserWishlist
+} from '../services/wishlistService';
+import {
+  Product,
+  Category,
+  Attribute,
+  PromoCode,
+  CartItem,
+  Order,
+  HomeSection,
+  PageContent,
+   ModelAmbassador,
+  CustomerReview,
+  ProductColor,
+  UserProfile,
+  SavedAddress,
+  EmailLog,
+  SiteConfig
+} from '../types';
+import { DEFAULT_SITE_CONFIG } from '../data/defaultSiteConfig';
+import {
+  readCachedSiteConfig,
+  subscribeSiteConfig,
+  saveSiteConfig,
+  applySiteConfigToDocument
+} from '../services/siteConfigService';
+import {
+  sendOrderConfirmationEmail,
+  getEmailLogs,
+  deleteEmailLog
+} from '../services/emailService';
+import { syncOrderToServer } from '../services/hilowService';
+import {
+  deleteModelInDb,
+  getAllModelsFromDb,
+  restockProductCooldown,
+  saveModelInDb
+} from '../services/creatorService';
+import { calculateOrderCreatorSplits } from '../lib/marketplace';
+import {
+  INITIAL_CATEGORIES,
+  INITIAL_ATTRIBUTES,
+  INITIAL_PROMO_CODES,
+  INITIAL_HOME_SECTIONS,
+  INITIAL_PAGES
+} from '../data/initialData';
+import {
+  countDemoRecords,
+  DemoCountsSummary,
+  isDemoModel,
+  isDemoProduct,
+  isDemoReview,
+  purgeDemoRecordsFromFirestore,
+  seedDemoRecordsToFirestore
+} from '../lib/demoCleanup';
+
+export type StoreView =
+  | 'home'
+  | 'catalog'
+  | 'creators'
+  | 'creator-detail'
+  | 'creator-invite'
+  | 'creator-portal'
+  | 'product-detail'
+  | 'page'
+  | 'admin'
+  | 'wishlist'
+  | 'checkout'
+  | 'checkout-success'
+  | 'subscription'
+  | 'subscription-success'
+  | 'subscription-cancelled'
+  | 'subscription-partial'
+  | 'account-subscription';
+
+interface StoreContextType {
+  // Auth (bridged from AuthContext)
+  user: any;
+  userProfile: UserProfile | null;
+  isAdmin: boolean;
+  isModerator: boolean;
+  isCreator: boolean;
+  creatorModelId: string | null;
+  canAccessAdminPanel: boolean;
+  isAuthLoading: boolean;
+  loginWithGoogle: () => Promise<any>;
+  loginWithEmail: (email: string, password: string) => Promise<any>;
+  registerWithEmail: (
+    email: string,
+    password: string,
+    displayName: string,
+    extraData?: { phoneNumber?: string; addresses?: SavedAddress[] }
+  ) => Promise<any>;
+  sendPasswordReset: (email: string) => Promise<void>;
+  sendVerificationEmail: () => Promise<{ mode: 'mailjet' | 'firebase' }>;
+  logout: () => Promise<void>;
+  updateUserProfile: (
+    data: Partial<
+      Pick<
+        UserProfile,
+        | 'phoneNumber'
+        | 'displayName'
+        | 'photoURL'
+        | 'addresses'
+        | 'loyaltyPoints'
+        | 'favoriteProductIds'
+        | 'favoriteModelIds'
+      >
+    >
+  ) => Promise<void>;
+  toggleFavoriteModel: (modelId: string) => Promise<void>;
+  isAuthModalOpen: boolean;
+  setIsAuthModalOpen: (open: boolean) => void;
+  isAccountModalOpen: boolean;
+  setIsAccountModalOpen: (open: boolean) => void;
+  sessionTimeoutMinutes: number;
+  updateSessionTimeoutMinutes: (minutes: number) => Promise<void>;
+  sessionWarningSecondsLeft: number | null;
+  sessionExpiredByInactivity: boolean;
+  dismissSessionExpiredNotice: () => void;
+  extendSession: () => void;
+
+  // Navigation
+  currentView: StoreView;
+  setCurrentView: (view: StoreView) => void;
+  checkoutSuccessOrderId: string | null;
+  setCheckoutSuccessOrderId: (orderId: string | null) => void;
+  adminTab: string;
+  setAdminTab: (tab: string) => void;
+  selectedProduct: Product | null;
+  setSelectedProduct: (product: Product | null) => void;
+  selectedCategorySlug: string | null;
+  setSelectedCategorySlug: (slug: string | null) => void;
+  selectedSubcategorySlug: string | null;
+  setSelectedSubcategorySlug: (slug: string | null) => void;
+  selectedCreatorModel: ModelAmbassador | null;
+  setSelectedCreatorModel: (model: ModelAmbassador | null) => void;
+  creatorInviteToken: string | null;
+  setCreatorInviteToken: (token: string | null) => void;
+  selectedPage: PageContent | null;
+  setSelectedPage: (page: PageContent | null) => void;
+  searchQuery: string;
+  setSearchQuery: (query: string) => void;
+
+  // Wishlist
+  wishlist: string[];
+  toggleWishlist: (productId: string) => Promise<void>;
+  isInWishlist: (productId: string) => boolean;
+
+  // Catalog Data
+  products: Product[];
+  categories: Category[];
+  attributes: Attribute[];
+  promoCodes: PromoCode[];
+  homeSections: HomeSection[];
+  pages: PageContent[];
+  models: ModelAmbassador[];
+  reviews: CustomerReview[];
+  orders: Order[];
+
+  // Cart & Checkout
+  cart: CartItem[];
+  isCartOpen: boolean;
+  setIsCartOpen: (open: boolean) => void;
+  addToCart: (product: Product, color: ProductColor, size: string, length?: string, quantity?: number) => void;
+  removeFromCart: (cartItemId: string) => void;
+  updateCartQuantity: (cartItemId: string, newQty: number) => void;
+  clearCart: () => void;
+  appliedPromo: PromoCode | null;
+  applyPromoCode: (code: string) => { success: boolean; message: string; promo?: PromoCode };
+  validatePromoCodeAsync: (code: string) => Promise<{ success: boolean; message: string; promo?: PromoCode }>;
+  removePromoCode: () => void;
+  cartSubtotal: number;
+  volumeDiscount: number;
+  volumeDiscountPercent: number;
+  cartDiscount: number;
+  cartShipping: number;
+  cartTotal: number;
+  freeShippingThreshold: number;
+  freeShippingRemaining: number;
+
+  // CRUD Actions (Admin & Store)
+  addProduct: (product: Product) => Promise<void>;
+  updateProduct: (product: Product) => Promise<void>;
+  deleteProduct: (id: string) => Promise<void>;
+  restockProduct: (productId: string) => Promise<void>;
+
+  addModel: (model: ModelAmbassador) => Promise<void>;
+  updateModel: (model: ModelAmbassador) => Promise<void>;
+  deleteModel: (id: string) => Promise<void>;
+
+  addCategory: (category: Category) => Promise<void>;
+  updateCategory: (category: Category) => Promise<void>;
+  deleteCategory: (id: string) => Promise<void>;
+
+  addAttribute: (attr: Attribute) => Promise<void>;
+  updateAttribute: (attr: Attribute) => Promise<void>;
+  deleteAttribute: (id: string) => Promise<void>;
+
+  addPromoCode: (promo: PromoCode) => Promise<void>;
+  updatePromoCode: (promo: PromoCode) => Promise<void>;
+  deletePromoCode: (id: string) => Promise<void>;
+
+  updateHomeSections: (sections: HomeSection[]) => Promise<void>;
+  deleteHomeSection: (id: string) => Promise<void>;
+  updatePage: (page: PageContent) => Promise<void>;
+  addOrder: (order: Order) => Promise<void>;
+  updateOrderStatus: (orderId: string, status: Order['status']) => Promise<void>;
+  markOrderPaidLocally: (orderId: string) => void;
+  refreshOrders: () => Promise<void>;
+  patchOrderPacklink: (orderId: string, packlink: NonNullable<Order['packlink']>) => void;
+  addReview: (review: CustomerReview) => Promise<void>;
+
+  // Transactional Emails (Firebase Cloud Functions)
+  emailLogs: EmailLog[];
+  refreshEmailLogs: () => Promise<void>;
+  sendOrderConfirmation: (
+    order: Order,
+    note?: string
+  ) => Promise<{ success: boolean; message: string; mailId: string; previewHtml: string }>;
+  removeEmailLog: (logId: string) => Promise<void>;
+
+  // Catalog readiness & demo cleanup helpers
+  catalogLoaded: boolean;
+  demoCounts: DemoCountsSummary;
+  purgeDemoCatalog: () => Promise<number>;
+  loadDemoCatalogSamples: () => Promise<void>;
+
+  // Global Site Configuration
+  siteConfig: SiteConfig;
+  updateSiteConfig: (nextConfig: SiteConfig) => Promise<SiteConfig>;
+  resetSiteConfig: () => Promise<SiteConfig>;
+}
+
+const StoreContext = createContext<StoreContextType | undefined>(undefined);
+
+export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  // Auth state bridged directly from AuthContext
+  const {
+    user,
+    userProfile,
+    loading: isAuthLoading,
+    isAdmin,
+    isModerator,
+    isCreator,
+    creatorModelId,
+    canAccessAdminPanel,
+    loginWithGoogle,
+    loginWithEmail,
+    registerWithEmail,
+    sendPasswordReset,
+    sendVerificationEmail,
+    logout,
+    updateUserProfile,
+    toggleFavoriteModel,
+    isAuthModalOpen,
+    setIsAuthModalOpen,
+    isAccountModalOpen,
+    setIsAccountModalOpen,
+    sessionTimeoutMinutes,
+    updateSessionTimeoutMinutes,
+    sessionWarningSecondsLeft,
+    sessionExpiredByInactivity,
+    dismissSessionExpiredNotice,
+    extendSession
+  } = useAuth();
+
+  // Navigation state
+  const [currentView, setCurrentView] = useState<StoreView>('home');
+  const [checkoutSuccessOrderId, setCheckoutSuccessOrderId] = useState<string | null>(null);
+  const [adminTab, setAdminTab] = useState<string>('productos');
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  const [selectedCategorySlug, setSelectedCategorySlug] = useState<string | null>(null);
+  const [selectedSubcategorySlug, setSelectedSubcategorySlug] = useState<string | null>(null);
+  const [selectedCreatorModel, setSelectedCreatorModel] = useState<ModelAmbassador | null>(null);
+  const [creatorInviteToken, setCreatorInviteToken] = useState<string | null>(null);
+  const [selectedPage, setSelectedPage] = useState<PageContent | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+
+  // Wishlist state
+  const [wishlist, setWishlist] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('cs_wishlist');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  // Sync wishlist with Firestore when user is authenticated
+  useEffect(() => {
+    if (!user) return;
+    const unsub = subscribeToUserWishlist(user.uid, (remoteIds) => {
+      setWishlist(remoteIds);
+      try {
+        localStorage.setItem('cs_wishlist', JSON.stringify(remoteIds));
+      } catch (e) {
+        console.warn('LocalStorage error:', e);
+      }
+    });
+    return () => unsub();
+  }, [user]);
+
+  const toggleWishlist = async (productId: string) => {
+    const next = wishlist.includes(productId)
+      ? wishlist.filter((id) => id !== productId)
+      : [...wishlist, productId];
+    setWishlist(next);
+    try {
+      localStorage.setItem('cs_wishlist', JSON.stringify(next));
+    } catch (e) {
+      console.warn('LocalStorage error:', e);
+    }
+
+    if (user) {
+      try {
+        await saveUserWishlist(user.uid, next);
+      } catch (err) {
+        console.warn('Could not save wishlist to Firestore:', err);
+      }
+    }
+  };
+
+  const isInWishlist = (productId: string) => {
+    return wishlist.includes(productId);
+  };
+
+  // Cart state
+  const [cart, setCart] = useState<CartItem[]>(() => {
+    try {
+      const saved = localStorage.getItem('cs_cart');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [isCartOpen, setIsCartOpen] = useState(false);
+  const [appliedPromo, setAppliedPromo] = useState<PromoCode | null>(null);
+
+  // Data states (Products, Creators and Reviews read directly from Firestore without demo auto-seeding)
+  const [catalogLoaded, setCatalogLoaded] = useState(false);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [categories, setCategories] = useState<Category[]>(INITIAL_CATEGORIES);
+  const [attributes, setAttributes] = useState<Attribute[]>(INITIAL_ATTRIBUTES);
+  const [promoCodes, setPromoCodes] = useState<PromoCode[]>(INITIAL_PROMO_CODES);
+  const [homeSections, setHomeSections] = useState<HomeSection[]>(INITIAL_HOME_SECTIONS);
+  const [pages, setPages] = useState<PageContent[]>(INITIAL_PAGES);
+  const [models, setModels] = useState<ModelAmbassador[]>([]);
+  const [reviews, setReviews] = useState<CustomerReview[]>([]);
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [emailLogs, setEmailLogs] = useState<EmailLog[]>([]);
+  const [siteConfig, setSiteConfig] = useState<SiteConfig>(() => readCachedSiteConfig());
+
+  // Subscribe & apply global SiteConfig
+  useEffect(() => {
+    applySiteConfigToDocument(siteConfig);
+  }, [siteConfig]);
+
+  useEffect(() => {
+    const unsub = subscribeSiteConfig((remoteConfig) => {
+      setSiteConfig(remoteConfig);
+    });
+    return () => unsub();
+  }, []);
+
+  const updateSiteConfig = async (nextConfig: SiteConfig): Promise<SiteConfig> => {
+    const saved = await saveSiteConfig(nextConfig, user?.email || 'admin');
+    setSiteConfig(saved);
+    applySiteConfigToDocument(saved);
+    return saved;
+  };
+
+  const resetSiteConfig = async (): Promise<SiteConfig> => {
+    const saved = await saveSiteConfig(DEFAULT_SITE_CONFIG, user?.email || 'admin');
+    setSiteConfig(saved);
+    applySiteConfigToDocument(saved);
+    return saved;
+  };
+
+  // Persist cart
+  useEffect(() => {
+    try {
+      localStorage.setItem('cs_cart', JSON.stringify(cart));
+    } catch (e) {
+      console.warn('LocalStorage error:', e);
+    }
+  }, [cart]);
+
+  // Fetch public storefront collections from Firestore independently
+  const fetchCatalog = useCallback(async () => {
+    try {
+      try {
+        const prodSnap = await getDocs(collection(db, 'products'));
+        const list: Product[] = [];
+        prodSnap.forEach((d) => list.push(d.data() as Product));
+        setProducts(list);
+      } catch (err) {
+        console.warn('Products read warning:', err);
+      }
+
+      try {
+        const catSnap = await getDocs(collection(db, 'categories'));
+        if (!catSnap.empty) {
+          const allowedSlugs = new Set(['sujetadores', 'braguitas', 'packs-lenceria', 'juguetes-usados']);
+          const list: Category[] = [];
+          catSnap.forEach((d) => {
+            const cat = d.data() as Category;
+            if (allowedSlugs.has(cat.slug)) {
+              list.push(cat);
+            }
+          });
+          if (list.length > 0) {
+            setCategories(list.sort((a, b) => a.order - b.order));
+          }
+        }
+      } catch (err) {
+        console.warn('Categories read fallback:', err);
+      }
+
+      try {
+        const attrSnap = await getDocs(collection(db, 'attributes'));
+        if (!attrSnap.empty) {
+          const list: Attribute[] = [];
+          attrSnap.forEach((d) => list.push(d.data() as Attribute));
+          setAttributes(list);
+        }
+      } catch (err) {
+        console.warn('Attributes read fallback:', err);
+      }
+
+      try {
+        const promoSnap = await getDocs(collection(db, 'promoCodes'));
+        if (!promoSnap.empty) {
+          const list: PromoCode[] = [];
+          promoSnap.forEach((d) => list.push(d.data() as PromoCode));
+          setPromoCodes(list);
+        }
+      } catch (err) {
+        console.warn('PromoCodes read fallback:', err);
+      }
+
+      try {
+        const revSnap = await getDocs(collection(db, 'reviews'));
+        const list: CustomerReview[] = [];
+        revSnap.forEach((d) => list.push(d.data() as CustomerReview));
+        setReviews(list);
+      } catch (err) {
+        console.warn('Reviews read warning:', err);
+      }
+
+      try {
+        const remoteModels = await getAllModelsFromDb();
+        setModels(remoteModels);
+      } catch (err) {
+        console.warn('Models read warning:', err);
+      }
+
+      try {
+        const secSnap = await getDocs(collection(db, 'homeSections'));
+        if (!secSnap.empty) {
+          const list: HomeSection[] = [];
+          secSnap.forEach((d) => {
+            const secData = d.data() as HomeSection;
+            list.push({ ...secData, id: secData.id || d.id });
+          });
+          if (list.length > 0) {
+            setHomeSections(list.sort((a, b) => (a.order ?? 999) - (b.order ?? 999)));
+          }
+        }
+      } catch (err) {
+        console.warn('HomeSections read fallback:', err);
+      }
+    } finally {
+      setCatalogLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchCatalog();
+  }, [fetchCatalog]);
+
+  const demoCounts = useMemo(
+    () => countDemoRecords({ products, models, reviews, promoCodes }),
+    [products, models, reviews, promoCodes]
+  );
+
+  const purgeDemoCatalog = useCallback(async (): Promise<number> => {
+    const { deletedCount } = await purgeDemoRecordsFromFirestore({
+      products,
+      models,
+      reviews
+    });
+    setProducts((prev) => prev.filter((p) => !isDemoProduct(p)));
+    setModels((prev) => prev.filter((m) => !isDemoModel(m)));
+    setReviews((prev) => prev.filter((r) => !isDemoReview(r)));
+    return deletedCount;
+  }, [products, models, reviews]);
+
+  const loadDemoCatalogSamples = useCallback(async (): Promise<void> => {
+    await seedDemoRecordsToFirestore();
+    await fetchCatalog();
+  }, [fetchCatalog]);
+
+  // Fetch orders & email logs securely according to user authentication & role
+  const refreshOrders = useCallback(async () => {
+    if (!user) {
+      setOrders([]);
+      return;
+    }
+
+    try {
+      const mergedOrders = new Map<string, Order>();
+
+      if (canAccessAdminPanel) {
+        const ordersSnap = await getDocs(collection(db, 'orders'));
+        ordersSnap.forEach((d) => {
+          const ord = { id: d.id, ...d.data() } as Order;
+          mergedOrders.set(ord.id, ord);
+        });
+      } else {
+        const ownOrdersSnap = await getDocs(
+          query(collection(db, 'orders'), where('userId', '==', user.uid))
+        );
+        ownOrdersSnap.forEach((d) => {
+          const ord = { id: d.id, ...d.data() } as Order;
+          mergedOrders.set(ord.id, ord);
+        });
+
+        if (isCreator) {
+          try {
+            const creatorOrdersSnap = await getDocs(
+              query(collection(db, 'orders'), where('creatorOwnerUids', 'array-contains', user.uid))
+            );
+            creatorOrdersSnap.forEach((d) => {
+              const ord = { id: d.id, ...d.data() } as Order;
+              mergedOrders.set(ord.id, ord);
+            });
+          } catch (creatorOrderErr) {
+            console.warn('Creator orders read warning:', creatorOrderErr);
+          }
+        }
+      }
+
+      const list = Array.from(mergedOrders.values());
+      setOrders(
+        list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      );
+    } catch (err) {
+      console.warn('Orders read skipped or restricted:', err);
+    }
+  }, [user, canAccessAdminPanel, isCreator]);
+
+  useEffect(() => {
+    const fetchProtectedData = async () => {
+      if (!user) {
+        setOrders([]);
+        setEmailLogs([]);
+        return;
+      }
+
+      await refreshOrders();
+
+      if (canAccessAdminPanel) {
+        try {
+          const logs = await getEmailLogs();
+          setEmailLogs(logs);
+        } catch (err) {
+          console.warn('Email logs read skipped:', err);
+        }
+      }
+    };
+
+    fetchProtectedData();
+  }, [user, canAccessAdminPanel, refreshOrders]);
+
+  // Cart actions
+  const addToCart = (product: Product, color: ProductColor, size: string, length?: string, quantity = 1) => {
+    const itemKey = `${product.id}-${color.name}-${size}-${length || 'std'}`;
+    setCart((prev) => {
+      const existing = prev.find((item) => item.id === itemKey);
+      if (existing) {
+        return prev.map((item) =>
+          item.id === itemKey ? { ...item, quantity: item.quantity + quantity } : item
+        );
+      }
+      return [
+        ...prev,
+        {
+          id: itemKey,
+          product,
+          selectedColor: color,
+          selectedSize: size,
+          selectedLength: length,
+          quantity
+        }
+      ];
+    });
+    setIsCartOpen(true);
+  };
+
+  const removeFromCart = (cartItemId: string) => {
+    setCart((prev) => prev.filter((item) => item.id !== itemKey(cartItemId)));
+  };
+
+  function itemKey(id: string) {
+    return id;
+  }
+
+  const updateCartQuantity = (cartItemId: string, newQty: number) => {
+    if (newQty <= 0) {
+      removeFromCart(cartItemId);
+      return;
+    }
+    setCart((prev) =>
+      prev.map((item) => (item.id === cartItemId ? { ...item, quantity: newQty } : item))
+    );
+  };
+
+  const clearCart = () => {
+    setCart([]);
+    setAppliedPromo(null);
+  };
+
+  const applyPromoCode = (code: string): { success: boolean; message: string; promo?: PromoCode } => {
+    const cleanCode = code.trim().toUpperCase();
+    const found = promoCodes.find((p) => p.code.toUpperCase() === cleanCode && p.active);
+    if (found) {
+      if (found.maxUses && found.maxUses > 0 && found.usesCount >= found.maxUses) {
+        return {
+          success: false,
+          message: `El cupón ${found.code} ha alcanzado su límite máximo de usos.`
+        };
+      }
+      if (found.validUntil) {
+        const expDate = new Date(found.validUntil);
+        if (!Number.isNaN(expDate.getTime()) && expDate.getTime() < Date.now() - 86400000) {
+          return {
+            success: false,
+            message: `El cupón ${found.code} ha expirado.`
+          };
+        }
+      }
+      if (found.minOrderAmount && found.minOrderAmount > 0 && cartSubtotal < found.minOrderAmount) {
+        return {
+          success: false,
+          message: `El cupón ${found.code} requiere un pedido mínimo de ${found.minOrderAmount.toFixed(2)} €.`
+        };
+      }
+
+      setAppliedPromo(found);
+      const msg =
+        found.discountType === 'free_shipping'
+          ? `¡Cupón ${found.code} aplicado! Disfrutas de Envío 100% Gratuito.`
+          : found.discountType === 'percent'
+          ? `¡Cupón ${found.code} aplicado (-${found.discountValue}%)!`
+          : `¡Cupón ${found.code} aplicado (-${found.discountValue.toFixed(2)} €)!`;
+
+      return { success: true, message: msg, promo: found };
+    }
+    return { success: false, message: 'Código promocional no válido o no encontrado.' };
+  };
+
+  const validatePromoCodeAsync = async (
+    code: string
+  ): Promise<{ success: boolean; message: string; promo?: PromoCode }> => {
+    const cleanCode = code.trim().toUpperCase();
+    if (!cleanCode) {
+      return { success: false, message: 'Introduce un código de cupón.' };
+    }
+    const localRes = applyPromoCode(cleanCode);
+    if (localRes.success) return localRes;
+
+    // Fallback: consultar directamente en Firestore /promoCodes por si se acaba de crear
+    try {
+      const q = query(collection(db, 'promoCodes'), where('code', '==', cleanCode));
+      const snap = await getDocs(q);
+      if (!snap.empty) {
+        const remotePromo = { id: snap.docs[0].id, ...snap.docs[0].data() } as PromoCode;
+        if (remotePromo.active) {
+          if (
+            remotePromo.minOrderAmount &&
+            remotePromo.minOrderAmount > 0 &&
+            cartSubtotal < remotePromo.minOrderAmount
+          ) {
+            return {
+              success: false,
+              message: `El cupón ${remotePromo.code} requiere un pedido mínimo de ${remotePromo.minOrderAmount.toFixed(2)} €.`
+            };
+          }
+          setPromoCodes((prev) =>
+            prev.some((p) => p.id === remotePromo.id) ? prev : [...prev, remotePromo]
+          );
+          setAppliedPromo(remotePromo);
+          const msg =
+            remotePromo.discountType === 'free_shipping'
+              ? `¡Cupón ${remotePromo.code} aplicado! Disfrutas de Envío 100% Gratuito.`
+              : remotePromo.discountType === 'percent'
+              ? `¡Cupón ${remotePromo.code} aplicado (-${remotePromo.discountValue}%)!`
+              : `¡Cupón ${remotePromo.code} aplicado (-${remotePromo.discountValue.toFixed(2)} €)!`;
+          return { success: true, message: msg, promo: remotePromo };
+        }
+      }
+    } catch (err) {
+      console.warn('Firestore promo validation fallback warning:', err);
+    }
+
+    return localRes;
+  };
+
+  const removePromoCode = () => {
+    setAppliedPromo(null);
+  };
+
+  // Cart pricing calculations (with configurable volume discount & shipping rules)
+  const totalUnits = cart.reduce((acc, item) => acc + item.quantity, 0);
+  const cartSubtotal = cart.reduce((acc, item) => acc + item.product.price * item.quantity, 0);
+  const enableVolume = siteConfig.product.enableVolumeDiscounts ?? true;
+  const volumeDiscountPercent = enableVolume ? (totalUnits >= 3 ? 10 : totalUnits === 2 ? 5 : 0) : 0;
+  const volumeDiscount = Number(((cartSubtotal * volumeDiscountPercent) / 100).toFixed(2));
+  const subtotalAfterVolume = Math.max(0, cartSubtotal - volumeDiscount);
+
+  const cartDiscount = appliedPromo
+    ? appliedPromo.discountType === 'percent'
+      ? Number(((subtotalAfterVolume * appliedPromo.discountValue) / 100).toFixed(2))
+      : appliedPromo.discountType === 'fixed'
+      ? Number(Math.min(subtotalAfterVolume, appliedPromo.discountValue).toFixed(2))
+      : 0
+    : 0;
+
+  const subtotalAfterAllDiscounts = Math.max(0, subtotalAfterVolume - cartDiscount);
+  const freeShippingThreshold = Number(siteConfig.product.freeShippingThreshold ?? 40.0);
+  const flatShippingRate = Number(siteConfig.product.flatShippingRate ?? 5.99);
+  const isFreeShippingPromo = appliedPromo?.discountType === 'free_shipping';
+  const isFreeShipping =
+    subtotalAfterAllDiscounts >= freeShippingThreshold || cart.length === 0 || isFreeShippingPromo;
+  const cartShipping = isFreeShipping ? 0 : flatShippingRate;
+  const cartTotal = Number(Math.max(0, subtotalAfterAllDiscounts + cartShipping).toFixed(2));
+  const freeShippingRemaining = isFreeShippingPromo
+    ? 0
+    : Number(Math.max(0, freeShippingThreshold - subtotalAfterAllDiscounts).toFixed(2));
+
+  // CRUD Implementations with Firestore + Local State
+  const addProduct = async (product: Product) => {
+    setProducts((prev) => [product, ...prev]);
+    try {
+      await createProduct(product);
+    } catch (err) {
+      console.error('Error creating product via productService:', err);
+    }
+  };
+
+  const updateProduct = async (product: Product) => {
+    setProducts((prev) => prev.map((p) => (p.id === product.id ? product : p)));
+    try {
+      await updateProductInDb(product.id, product);
+    } catch (err) {
+      console.error('Error updating product via productService:', err);
+    }
+  };
+
+  const deleteProduct = async (id: string) => {
+    setProducts((prev) => prev.filter((p) => p.id !== id));
+    try {
+      await deleteProductFromDb(id);
+    } catch (err) {
+      console.error('Error deleting product via productService:', err);
+    }
+  };
+
+  const restockProduct = async (productId: string) => {
+    const nowIso = new Date().toISOString();
+    setProducts((prev) =>
+      prev.map((p) =>
+        p.id === productId
+          ? { ...p, availabilityStatus: 'available', inStock: true, cooldownUntil: null, updatedAt: nowIso }
+          : p
+      )
+    );
+    try {
+      await restockProductCooldown(productId);
+    } catch (err) {
+      console.warn('Could not persist product restock in Firestore:', err);
+    }
+  };
+
+  const addModel = async (model: ModelAmbassador) => {
+    setModels((prev) => [...prev.filter((m) => m.id !== model.id), model]);
+    try {
+      await saveModelInDb(model);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `models/${model.id}`);
+    }
+  };
+
+  const updateModel = async (model: ModelAmbassador) => {
+    setModels((prev) => prev.map((m) => (m.id === model.id ? model : m)));
+    if (selectedCreatorModel?.id === model.id) {
+      setSelectedCreatorModel(model);
+    }
+    try {
+      await saveModelInDb(model);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `models/${model.id}`);
+    }
+  };
+
+  const deleteModel = async (id: string) => {
+    setModels((prev) => prev.filter((m) => m.id !== id));
+    try {
+      await deleteModelInDb(id);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, `models/${id}`);
+    }
+  };
+
+  const addCategory = async (category: Category) => {
+    setCategories((prev) => [...prev, category]);
+    try {
+      await setDoc(doc(db, 'categories', category.id), sanitizeFirestoreData(category));
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `categories/${category.id}`);
+    }
+  };
+
+  const updateCategory = async (category: Category) => {
+    setCategories((prev) => prev.map((c) => (c.id === category.id ? category : c)));
+    try {
+      await setDoc(doc(db, 'categories', category.id), sanitizeFirestoreData(category));
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `categories/${category.id}`);
+    }
+  };
+
+  const deleteCategory = async (id: string) => {
+    setCategories((prev) => prev.filter((c) => c.id !== id));
+    try {
+      await deleteDoc(doc(db, 'categories', id));
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, `categories/${id}`);
+    }
+  };
+
+  const addAttribute = async (attr: Attribute) => {
+    setAttributes((prev) => [...prev, attr]);
+    try {
+      await setDoc(doc(db, 'attributes', attr.id), sanitizeFirestoreData(attr));
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `attributes/${attr.id}`);
+    }
+  };
+
+  const updateAttribute = async (attr: Attribute) => {
+    setAttributes((prev) => prev.map((a) => (a.id === attr.id ? attr : a)));
+    try {
+      await setDoc(doc(db, 'attributes', attr.id), sanitizeFirestoreData(attr));
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `attributes/${attr.id}`);
+    }
+  };
+
+  const deleteAttribute = async (id: string) => {
+    setAttributes((prev) => prev.filter((a) => a.id !== id));
+    try {
+      await deleteDoc(doc(db, 'attributes', id));
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, `attributes/${id}`);
+    }
+  };
+
+  const addPromoCode = async (promo: PromoCode) => {
+    setPromoCodes((prev) => [...prev, promo]);
+    try {
+      await setDoc(doc(db, 'promoCodes', promo.id), sanitizeFirestoreData(promo));
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `promoCodes/${promo.id}`);
+    }
+  };
+
+  const updatePromoCode = async (promo: PromoCode) => {
+    setPromoCodes((prev) => prev.map((p) => (p.id === promo.id ? promo : p)));
+    try {
+      await setDoc(doc(db, 'promoCodes', promo.id), sanitizeFirestoreData(promo));
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `promoCodes/${promo.id}`);
+    }
+  };
+
+  const deletePromoCode = async (id: string) => {
+    setPromoCodes((prev) => prev.filter((p) => p.id !== id));
+    try {
+      await deleteDoc(doc(db, 'promoCodes', id));
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, `promoCodes/${id}`);
+    }
+  };
+
+  const updateHomeSections = async (sections: HomeSection[]) => {
+    const normalized = sections
+      .slice()
+      .sort((a, b) => (a.order ?? 999) - (b.order ?? 999))
+      .map((s, idx) => ({ ...s, order: idx + 1 }));
+    setHomeSections(normalized);
+    try {
+      for (const s of normalized) {
+        await setDoc(doc(db, 'homeSections', s.id), sanitizeFirestoreData(s));
+      }
+    } catch (err) {
+      console.warn('Home sections sync warning:', err);
+    }
+  };
+
+  const deleteHomeSection = async (id: string) => {
+    const remaining = homeSections
+      .filter((s) => s.id !== id)
+      .sort((a, b) => (a.order ?? 999) - (b.order ?? 999))
+      .map((s, idx) => ({ ...s, order: idx + 1 }));
+    setHomeSections(remaining);
+    try {
+      await deleteDoc(doc(db, 'homeSections', id));
+      for (const s of remaining) {
+        await setDoc(doc(db, 'homeSections', s.id), sanitizeFirestoreData(s));
+      }
+    } catch (err) {
+      console.warn('Home section delete sync warning:', err);
+    }
+  };
+
+  const updatePage = async (page: PageContent) => {
+    setPages((prev) => prev.map((p) => (p.id === page.id ? page : p)));
+    try {
+      await setDoc(doc(db, 'pages', page.id), sanitizeFirestoreData(page));
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `pages/${page.id}`);
+    }
+  };
+
+  const addOrder = async (order: Order) => {
+    // Enrich order with creator revenue splits (Phase 1 60/20/20 or Phase 2 fixed team)
+    const totalDiscounts = (order.discount || 0) + (order.volumeDiscount || 0);
+    const discountRatio =
+      order.subtotal > 0 ? Math.min(1, Math.max(0, totalDiscounts / order.subtotal)) : 0;
+
+    const syntheticCartItems: CartItem[] = (order.items || []).map((line, idx) => {
+      const matchedProduct =
+        products.find((p) => p.id === line.productId) ||
+        ({
+          id: line.productId,
+          name: line.productName,
+          slug: line.productId,
+          description: '',
+          categoryId: 'braguitas',
+          price: line.price,
+          rating: 5,
+          reviewCount: 0,
+          colors: [{ name: line.color || 'Único', hex: '#111111' }],
+          sizes: [line.size || 'M'],
+          inStock: true,
+          creatorId: line.creatorId,
+          modelIds: line.modelNames,
+          editionTier: line.editionTier || 'standard',
+          images: [line.image]
+        } as Product);
+
+      return {
+        id: `${line.productId}-${idx}`,
+        product: matchedProduct,
+        selectedColor: { name: line.color || 'Único', hex: '#111111' },
+        selectedSize: line.size || 'M',
+        quantity: line.quantity || 1
+      };
+    });
+
+    const splitSummary = calculateOrderCreatorSplits(syntheticCartItems, models, discountRatio);
+
+    const enrichedOrder: Order = {
+      ...order,
+      items: (order.items || []).map((line) => {
+        const matched = products.find((p) => p.id === line.productId);
+        return {
+          ...line,
+          creatorId: line.creatorId || matched?.creatorId,
+          modelNames: line.modelNames || matched?.modelIds,
+          editionTier: line.editionTier || matched?.editionTier || 'standard'
+        };
+      }),
+      creatorModelIds:
+        order.creatorModelIds && order.creatorModelIds.length > 0
+          ? order.creatorModelIds
+          : splitSummary.creatorModelIds,
+      creatorOwnerUids:
+        order.creatorOwnerUids && order.creatorOwnerUids.length > 0
+          ? order.creatorOwnerUids
+          : splitSummary.creatorOwnerUids,
+      creatorSplits:
+        order.creatorSplits && order.creatorSplits.length > 0
+          ? order.creatorSplits
+          : splitSummary.creatorSplits
+    };
+
+    const cleanOrder = sanitizeFirestoreData(enrichedOrder);
+    setOrders((prev) => [cleanOrder, ...prev.filter((o) => o.id !== cleanOrder.id)]);
+    if (cleanOrder.promoCodeApplied) {
+      const usedCode = String(cleanOrder.promoCodeApplied).trim().toUpperCase();
+      setPromoCodes((prev) =>
+        prev.map((p) =>
+          p.code.toUpperCase() === usedCode ? { ...p, usesCount: (p.usesCount || 0) + 1 } : p
+        )
+      );
+    }
+
+    try {
+      await setDoc(doc(db, 'orders', cleanOrder.id), cleanOrder);
+
+      // Non-blocking server sync for Admin backup & atomic promoCodes.usesCount increment
+      const idToken =
+        user && typeof user.getIdToken === 'function'
+          ? await user.getIdToken().catch(() => undefined)
+          : undefined;
+      void syncOrderToServer(cleanOrder, idToken);
+
+      // Only send immediate client confirmation email when order is already confirmed/paid;
+      // pending_payment orders trigger official confirmation via the HMAC webhook in server.ts.
+      if (cleanOrder.status === 'paid') {
+        try {
+          const result = await sendOrderConfirmationEmail(cleanOrder, {
+            triggeredBy: 'checkout',
+            emailConfig: siteConfig.email
+          });
+          console.log('[Checkout] Correo de confirmación enviado:', result);
+          if (canAccessAdminPanel) {
+            const logs = await getEmailLogs();
+            setEmailLogs(logs);
+          }
+        } catch (mailErr) {
+          console.warn('[Checkout] Correo no pudo ser encolado de inmediato:', mailErr);
+        }
+      }
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `orders/${cleanOrder.id}`);
+    }
+  };
+
+  const refreshEmailLogs = async () => {
+    try {
+      const logs = await getEmailLogs();
+      setEmailLogs(logs);
+    } catch (err) {
+      console.warn('Error refreshing email logs:', err);
+    }
+  };
+
+  const sendOrderConfirmation = async (order: Order, note?: string) => {
+    try {
+      const result = await sendOrderConfirmationEmail(order, {
+        note,
+        triggeredBy: user?.email || 'admin',
+        emailConfig: siteConfig.email
+      });
+      await refreshEmailLogs();
+      return result;
+    } catch (err: any) {
+      console.error('Error sending order confirmation:', err);
+      throw err;
+    }
+  };
+
+  const removeEmailLog = async (logId: string) => {
+    try {
+      await deleteEmailLog(logId);
+      setEmailLogs((prev) => prev.filter((l) => l.id !== logId));
+    } catch (err) {
+      console.error('Error deleting email log:', err);
+    }
+  };
+
+  const markOrderPaidLocally = useCallback((orderId: string) => {
+    const nowIso = new Date().toISOString();
+    let paidOrderItems: Order['items'] = [];
+
+    setOrders((prev) =>
+      prev.map((o) => {
+        if (o.id !== orderId) return o;
+        paidOrderItems = o.items || [];
+        return { ...o, status: 'paid', paidAt: o.paidAt || nowIso, updatedAt: nowIso };
+      })
+    );
+
+    if (paidOrderItems.length > 0) {
+      const soldIds = new Set(
+        paidOrderItems
+          .map((item) => item.productId)
+          .filter((id) => Boolean(id && id !== 'subscription_club'))
+      );
+      if (soldIds.size > 0) {
+        setProducts((prev) =>
+          prev.map((p) => {
+            if (!soldIds.has(p.id)) return p;
+            const days = Math.max(1, Math.min(30, p.cooldownDays || 4));
+            const cooldownUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+            return {
+              ...p,
+              availabilityStatus: 'cooldown',
+              inStock: false,
+              cooldownUntil,
+              lastSoldAt: nowIso,
+              updatedAt: nowIso
+            };
+          })
+        );
+      }
+    }
+  }, []);
+
+  const patchOrderPacklink = useCallback(
+    (orderId: string, packlink: NonNullable<Order['packlink']>) => {
+      const updatedAt = new Date().toISOString();
+      setOrders((prev) =>
+        prev.map((o) => (o.id === orderId ? { ...o, packlink, updatedAt } : o))
+      );
+    },
+    []
+  );
+
+  const updateOrderStatus = async (orderId: string, status: Order['status']) => {
+    const updatedAt = new Date().toISOString();
+    setOrders((prev) => prev.map((o) => (o.id === orderId ? { ...o, status, updatedAt } : o)));
+    if (!canAccessAdminPanel) {
+      // Non-staff clients never mutate authoritative order status directly in Firestore;
+      // verified payments transition in Firestore via the server HMAC webhook.
+      return;
+    }
+    try {
+      await updateDoc(doc(db, 'orders', orderId), { status, updatedAt });
+    } catch (err) {
+      console.warn(`[Orders] Could not update order ${orderId} status in Firestore:`, err);
+    }
+  };
+
+  const addReview = async (review: CustomerReview) => {
+    try {
+      const created = await submitProductReview(review);
+      setReviews((prev) => [created, ...prev]);
+    } catch (err) {
+      console.error('Error submitting review in context:', err);
+      throw err;
+    }
+  };
+
+  return (
+    <StoreContext.Provider
+      value={{
+        user,
+        userProfile,
+        isAdmin,
+        isModerator,
+        isCreator,
+        creatorModelId,
+        canAccessAdminPanel,
+        isAuthLoading,
+        loginWithGoogle,
+        loginWithEmail,
+        registerWithEmail,
+        sendPasswordReset,
+        sendVerificationEmail,
+        logout,
+        updateUserProfile,
+        toggleFavoriteModel,
+        isAuthModalOpen,
+        setIsAuthModalOpen,
+        isAccountModalOpen,
+        setIsAccountModalOpen,
+        sessionTimeoutMinutes,
+        updateSessionTimeoutMinutes,
+        sessionWarningSecondsLeft,
+        sessionExpiredByInactivity,
+        dismissSessionExpiredNotice,
+        extendSession,
+
+        currentView,
+        setCurrentView,
+        checkoutSuccessOrderId,
+        setCheckoutSuccessOrderId,
+        adminTab,
+        setAdminTab,
+        selectedProduct,
+        setSelectedProduct,
+        selectedCategorySlug,
+        setSelectedCategorySlug,
+        selectedSubcategorySlug,
+        setSelectedSubcategorySlug,
+        selectedCreatorModel,
+        setSelectedCreatorModel,
+        creatorInviteToken,
+        setCreatorInviteToken,
+        selectedPage,
+        setSelectedPage,
+        searchQuery,
+        setSearchQuery,
+
+        wishlist,
+        toggleWishlist,
+        isInWishlist,
+
+        products,
+        categories,
+        attributes,
+        promoCodes,
+        homeSections,
+        pages,
+        models,
+        reviews,
+        orders,
+
+        cart,
+        isCartOpen,
+        setIsCartOpen,
+        addToCart,
+        removeFromCart,
+        updateCartQuantity,
+        clearCart,
+        appliedPromo,
+        applyPromoCode,
+        validatePromoCodeAsync,
+        removePromoCode,
+        cartSubtotal,
+        volumeDiscount,
+        volumeDiscountPercent,
+        cartDiscount,
+        cartShipping,
+        cartTotal,
+        freeShippingThreshold,
+        freeShippingRemaining,
+
+        addProduct,
+        updateProduct,
+        deleteProduct,
+        restockProduct,
+        addModel,
+        updateModel,
+        deleteModel,
+        addCategory,
+        updateCategory,
+        deleteCategory,
+        addAttribute,
+        updateAttribute,
+        deleteAttribute,
+        addPromoCode,
+        updatePromoCode,
+        deletePromoCode,
+        updateHomeSections,
+        deleteHomeSection,
+        updatePage,
+        addOrder,
+        updateOrderStatus,
+        markOrderPaidLocally,
+        refreshOrders,
+        patchOrderPacklink,
+        addReview,
+
+        // Transactional emails
+        emailLogs,
+        refreshEmailLogs,
+        sendOrderConfirmation,
+        removeEmailLog,
+
+        // Catalog readiness & demo cleanup helpers
+        catalogLoaded,
+        demoCounts,
+        purgeDemoCatalog,
+        loadDemoCatalogSamples,
+
+        // Global Site Configuration
+        siteConfig,
+        updateSiteConfig,
+        resetSiteConfig
+      }}
+    >
+      {children}
+    </StoreContext.Provider>
+  );
+};
+
+export const useStore = () => {
+  const context = useContext(StoreContext);
+  if (!context) {
+    throw new Error('useStore must be used within a StoreProvider');
+  }
+  return context;
+};

@@ -13,6 +13,11 @@ import {
   FieldError,
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
+import {
+  clearStoredSessionActivity,
+  markSessionExpiredNotice,
+  writeStoredLastActivity,
+} from "@/lib/session-timeout"
 
 interface LoginFormProps extends React.ComponentProps<"form"> {
   showRegisterLink?: boolean
@@ -67,6 +72,10 @@ export function LoginForm({
         setIsLoading(false)
         return
       }
+
+      clearStoredSessionActivity()
+      markSessionExpiredNotice(null)
+      writeStoredLastActivity(session.user.id, Date.now())
 
       if (session.user.isAdmin) {
         router.push("/admin")

@@ -33,11 +33,20 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           return null
         }
 
-        const email = credentials.email as string
-        const password = credentials.password as string
+        const email = String(credentials.email).trim()
+        const password = String(credentials.password)
 
-        const user = await prisma.user.findUnique({
-          where: { email },
+        if (!email || !password) {
+          return null
+        }
+
+        const user = await prisma.user.findFirst({
+          where: {
+            email: {
+              equals: email,
+              mode: "insensitive",
+            },
+          },
           select: {
             id: true,
             email: true,
@@ -65,7 +74,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           },
         })
 
-        if (!user) {
+        if (!user || !user.password) {
           return null
         }
 
@@ -104,6 +113,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         token.adminRole = user.adminRole
         token.SubscriptionPlan = user.SubscriptionPlan
         token.subscriptionEnd = user.subscriptionEnd
+        token.signedInAt = Date.now()
       }
       // Refresh subscription info when session is updated
       if (trigger === "update" && token.id) {

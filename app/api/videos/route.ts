@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma"
 import { auth } from "@/auth"
 import { releaseDueVideos } from "@/lib/video-release"
 import { getPublicVideoPoolWhere, isVideoNew, isVideoScheduled } from "@/lib/video-status"
+import { setVideoDownloadOverride } from "@/lib/get-video-download-policy"
 
 // POST - Crear video (admin only)
 export async function POST(request: NextRequest) {
@@ -48,6 +49,8 @@ export async function POST(request: NextRequest) {
       muxUploadId,
       muxAssetId,
       muxPlaybackId,
+      // Optional per-video download schedule override
+      downloadOverride,
     } = body
 
     // Verificar slug único
@@ -121,6 +124,10 @@ export async function POST(request: NextRequest) {
         tags: { include: { tag: true } },
       },
     })
+
+    if (downloadOverride !== undefined) {
+      await setVideoDownloadOverride(video.id, downloadOverride)
+    }
 
     return NextResponse.json(video, { status: 201 })
   } catch (error) {

@@ -3,12 +3,20 @@
 import { useState, useEffect } from "react"
 import { toast } from "sonner"
 import { useRouter } from "next/navigation"
+import { Clock, Download, Loader2 } from "lucide-react"
+import {
+  formatDownloadUnlockDate,
+  type VideoDownloadAvailabilityReason,
+} from "@/lib/video-download-policy"
 
 interface VideoActionButtonsProps {
   videoId: string
   videoSlug: string
   userId?: string | null
   canDownload: boolean
+  downloadAvailable?: boolean
+  downloadAvailableAt?: string | null
+  downloadBlockReason?: VideoDownloadAvailabilityReason
   favoriteCount: number
   viewCount: string
 }
@@ -37,6 +45,9 @@ export function VideoActionButtons({
   videoSlug,
   userId,
   canDownload,
+  downloadAvailable = true,
+  downloadAvailableAt = null,
+  downloadBlockReason = "AVAILABLE",
   favoriteCount: initialFavCount,
   viewCount,
 }: VideoActionButtonsProps) {
@@ -106,9 +117,33 @@ export function VideoActionButtons({
     }
   }
 
+  const unlockDateLabel = downloadAvailableAt
+    ? formatDownloadUnlockDate(downloadAvailableAt, "en")
+    : null
+
+  const isScheduledForLater =
+    !downloadAvailable &&
+    (downloadBlockReason === "LOCKED_BY_DELAY" ||
+      downloadBlockReason === "LOCKED_BY_CUSTOM_DATE")
+  const isDisabledForVideo = !downloadAvailable && downloadBlockReason === "DISABLED"
+
   async function handleDownload() {
     if (!canDownload) {
       toast.error("Your plan does not allow downloads. Upgrade your subscription.")
+      return
+    }
+
+    if (isDisabledForVideo) {
+      toast.info("Downloads are disabled for this video.")
+      return
+    }
+
+    if (isScheduledForLater) {
+      toast.info(
+        unlockDateLabel
+          ? `Downloads for this video will unlock on ${unlockDateLabel}.`
+          : "Downloads are not available for this video yet."
+      )
       return
     }
 
@@ -121,7 +156,13 @@ export function VideoActionButtons({
         throw new Error(data.error || "Error downloading")
       }
 
-      window.open(data.downloadUrl, "_blank")
+      const link = document.createElement("a")
+      link.href = data.downloadUrl
+      link.rel = "noopener noreferrer"
+      link.download = data.filename || `${videoSlug}.mp4`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
       toast.success("Download started")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Error downloading")
@@ -129,6 +170,16 @@ export function VideoActionButtons({
       setIsDownloading(false)
     }
   }
+
+  const downloadTooltip = !canDownload
+    ? "Upgrade your plan to download"
+    : isDisabledForVideo
+      ? "Downloads are disabled for this video"
+      : isScheduledForLater
+        ? unlockDateLabel
+          ? `Download available on ${unlockDateLabel}`
+          : "Download not available yet"
+        : "Download video"
 
   return (
     <div
@@ -169,23 +220,35 @@ export function VideoActionButtons({
       </button>
 
       {/* Download */}
-      <button
-        onClick={handleDownload}
-        disabled={isDownloading || !canDownload}
-        className="flex items-center gap-1.5 p-1 h-auto transition-all duration-200 hover:opacity-80 disabled:opacity-50"
-        title={canDownload ? "Download video" : "Upgrade your plan to download"}
-      >
-        {isDownloading ? (
-          <svg className="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-          </svg>
-        ) : (
-          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-          </svg>
-        )}
-      </button>
+      {canDownload && isScheduledForLater ? (
+        <button
+          type="button"
+          onClick={handleDownload}
+          className="inline-flex items-center gap-1.5 px-2 py-1 text-xs font-medium border transition-opacity hover:opacity-85 cursor-pointer"
+          style={{
+            borderColor: "color-mix(in srgb, var(--border-color) 90%, transparent)",
+            color: "var(--text-muted)",
+          }}
+          title={downloadTooltip}
+        >
+          <Clock className="w-3.5 h-3.5 shrink-0" />
+          <span>{unlockDateLabel ? `Download ${unlockDateLabel}` : "Download locked"}</span>
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={handleDownload}
+          disabled={isDownloading || !canDownload || isDisabledForVideo}
+          className="flex items-center gap-1.5 p-1 h-auto transition-all duration-200 hover:opacity-80 disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed"
+          title={downloadTooltip}
+        >
+          {isDownloading ? (
+            <Loader2 className="animate-spin w-5 h-5" />
+          ) : (
+            <Download className="w-5 h-5" />
+          )}
+        </button>
+      )}
     </div>
   )
 }

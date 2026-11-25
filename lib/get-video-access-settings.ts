@@ -1,4 +1,9 @@
 import { prisma } from "@/lib/prisma"
+import {
+  DEFAULT_VIDEO_DOWNLOAD_POLICY,
+  type VideoDownloadPolicy,
+  sanitizeVideoDownloadPolicy,
+} from "@/lib/video-download-policy"
 
 export interface VideoAccessLockConfig {
   title: string
@@ -33,11 +38,13 @@ export interface VideoAccessLockConfig {
 
 export interface VideoAccessSettings {
   lockScreen: VideoAccessLockConfig
+  downloadPolicy: VideoDownloadPolicy
 }
 
 const SETTINGS_KEY = "video_access_settings"
 
 export const defaultVideoAccessSettings: VideoAccessSettings = {
+  downloadPolicy: { ...DEFAULT_VIDEO_DOWNLOAD_POLICY },
   lockScreen: {
     title: "Access Denied",
     description: "This content requires a subscription",
@@ -88,6 +95,9 @@ export async function getVideoAccessSettings(): Promise<VideoAccessSettings> {
         ...defaultVideoAccessSettings.lockScreen,
         ...value.lockScreen,
       },
+      downloadPolicy: value.downloadPolicy
+        ? sanitizeVideoDownloadPolicy(value.downloadPolicy)
+        : { ...DEFAULT_VIDEO_DOWNLOAD_POLICY },
     }
   } catch (error) {
     console.error("Error fetching video access settings:", error)
