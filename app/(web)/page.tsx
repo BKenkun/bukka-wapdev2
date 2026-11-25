@@ -7,6 +7,7 @@ import { SectionHeader } from "@/components/section-header"
 import { VideoGrid } from "@/components/video-grid"
 import { ActressesGrid } from "@/components/actresses-grid"
 import { CountdownTimer } from "@/components/countdown-timer"
+import { resolveUpcomingScene } from "@/lib/upcoming-scene"
 
 async function getHomeSections() {
   try {
@@ -26,6 +27,7 @@ export default async function Page() {
 
   // If no sections in DB, render the hardcoded fallback
   if (!sections || sections.length === 0) {
+    const fallbackUpcoming = await resolveUpcomingScene({ mode: "auto" })
     return (
       <main className="min-h-screen flex flex-col gap-[5px] font-sans">
         <Hero />
@@ -41,7 +43,7 @@ export default async function Page() {
         <VideoGrid />
         <SectionHeader title="FEATURED CATEGORY" />
         <VideoGrid />
-        <CountdownTimer />
+        <CountdownTimer resolved={fallbackUpcoming} />
       </main>
     )
   }

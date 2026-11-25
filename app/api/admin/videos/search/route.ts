@@ -24,18 +24,37 @@ export async function GET(request: NextRequest) {
     const ids = searchParams.get("ids")?.split(",").filter(Boolean) || []
     const limit = parseInt(searchParams.get("limit") || "20")
 
+    const videoSelect = {
+      id: true,
+      title: true,
+      slug: true,
+      thumbnailUrl: true,
+      previewUrl: true,
+      muxPlaybackId: true,
+      status: true,
+      releaseDate: true,
+      performers: {
+        include: {
+          performer: {
+            select: { name: true, slug: true },
+          },
+        },
+      },
+      categories: {
+        include: {
+          category: {
+            select: { name: true, slug: true },
+          },
+        },
+        take: 1,
+      },
+    } as const
+
     // If specific IDs are requested, fetch those videos
     if (ids.length > 0) {
       const videos = await prisma.video.findMany({
         where: { id: { in: ids } },
-        select: {
-          id: true,
-          title: true,
-          slug: true,
-          thumbnailUrl: true,
-          muxPlaybackId: true,
-          status: true,
-        },
+        select: videoSelect,
       })
 
       // Sort by the order of IDs provided
@@ -56,15 +75,8 @@ export async function GET(request: NextRequest) {
             ],
           }
         : {},
-      select: {
-        id: true,
-        title: true,
-        slug: true,
-        thumbnailUrl: true,
-        muxPlaybackId: true,
-        status: true,
-      },
-      orderBy: { createdAt: "desc" },
+      select: videoSelect,
+      orderBy: [{ releaseDate: "desc" }, { createdAt: "desc" }],
       take: limit,
     })
 

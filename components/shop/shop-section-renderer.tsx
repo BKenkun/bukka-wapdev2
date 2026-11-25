@@ -9,6 +9,9 @@ import { ProductCard } from "./product-card"
 import { CmsContent } from "@/components/cms-content"
 import Link from "next/link"
 import Image from "next/image"
+import { ArrowRight } from "lucide-react"
+import { BannerKicker } from "@/components/banner-kicker"
+import { sanitizeBannerUrl } from "@/lib/banner-utils"
 
 interface ShopSection {
   id: string
@@ -156,8 +159,12 @@ function ShopHeroSection({ config, title }: { config: Record<string, unknown>; t
   const ctaSecondaryUrl = (config.ctaSecondaryUrl as string) || ""
   const linkUrl = config.linkUrl as string | undefined
 
+  const safePrimaryUrl = sanitizeBannerUrl(ctaPrimaryUrl) || "/shop#productos"
+  const safeSecondaryUrl = sanitizeBannerUrl(ctaSecondaryUrl)
+  const safeLinkUrl = sanitizeBannerUrl(linkUrl)
+
   const content = (
-    <section className="relative w-full overflow-hidden" style={{ minHeight: "500px" }}>
+    <section className="relative w-full overflow-hidden bg-black" style={{ minHeight: "500px" }}>
       {/* Video background */}
       {videoUrl ? (
         <video
@@ -181,37 +188,45 @@ function ShopHeroSection({ config, title }: { config: Record<string, unknown>; t
         />
       )}
       <div className="absolute inset-0 bg-black/50" />
-      <div className="relative max-w-7xl mx-auto px-6 py-24 md:py-32 flex items-center min-h-[500px]">
-        <div className="max-w-2xl">
+      <div
+        aria-hidden="true"
+        className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/20 to-black/35 pointer-events-none"
+      />
+      <div className="relative z-10 max-w-7xl mx-auto px-6 sm:px-10 py-24 md:py-32 flex items-center min-h-[500px]">
+        <div className="max-w-3xl">
           {badgeText && (
-            <span
-              className="inline-block text-xs font-bold px-4 py-1.5 mb-6 tracking-wider text-white"
-              style={{ backgroundColor: "var(--brand-color, #E03E54)" }}
-            >
-              {badgeText}
-            </span>
+            <BannerKicker text={badgeText} align="left" className="mb-4" />
           )}
-          <h1 className="text-4xl md:text-6xl font-bold text-white mb-6 leading-tight">
+          <h1
+            className="font-black uppercase tracking-[-0.02em] leading-[1.03] text-white [text-wrap:balance] drop-shadow-[0_6px_26px_rgba(0,0,0,0.6)]"
+            style={{
+              fontSize: "clamp(2.35rem, 6vw, 4.5rem)",
+              fontFamily: "var(--global-font, var(--font-montserrat, Montserrat, sans-serif))",
+            }}
+          >
             {heroTitle}
           </h1>
           {subtitle && (
-            <p className="text-lg text-gray-300 mb-8 leading-relaxed">{subtitle}</p>
+            <p className="mt-4 text-sm sm:text-base md:text-lg font-medium tracking-[0.03em] text-white/85 max-w-2xl leading-relaxed">
+              {subtitle}
+            </p>
           )}
           {(ctaPrimaryText || ctaSecondaryText) && (
-            <div className="flex flex-wrap gap-4">
+            <div className="mt-8 flex flex-wrap gap-4">
               {ctaPrimaryText && (
                 <Link
-                  href={ctaPrimaryUrl}
-                  className="inline-flex items-center px-8 py-4 text-white font-bold text-lg transition-all hover:opacity-90 hover:scale-105"
+                  href={safePrimaryUrl}
+                  className="inline-flex items-center gap-2.5 px-9 py-4 text-white font-extrabold text-xs sm:text-sm uppercase tracking-[0.2em] transition-opacity hover:opacity-90"
                   style={{ backgroundColor: "var(--brand-color, #E03E54)" }}
                 >
-                  {ctaPrimaryText}
+                  <span>{ctaPrimaryText}</span>
+                  <ArrowRight className="size-4" />
                 </Link>
               )}
-              {ctaSecondaryText && (
+              {ctaSecondaryText && safeSecondaryUrl && (
                 <Link
-                  href={ctaSecondaryUrl}
-                  className="inline-flex items-center px-8 py-4 text-white font-bold text-lg border-2 border-white/30 transition-all hover:bg-white/10 hover:scale-105"
+                  href={safeSecondaryUrl}
+                  className="inline-flex items-center px-9 py-4 text-white font-extrabold text-xs sm:text-sm uppercase tracking-[0.2em] border border-white/40 transition-colors hover:bg-white/10"
                 >
                   {ctaSecondaryText}
                 </Link>
@@ -223,8 +238,8 @@ function ShopHeroSection({ config, title }: { config: Record<string, unknown>; t
     </section>
   )
 
-  if (linkUrl) {
-    return <Link href={linkUrl}>{content}</Link>
+  if (safeLinkUrl) {
+    return <Link href={safeLinkUrl}>{content}</Link>
   }
   return content
 }
@@ -332,39 +347,56 @@ async function ProductsGridSection({ config, title }: { config: Record<string, u
 function CtaBannerSection({ config }: { config: Record<string, unknown> }) {
   const videoUrl = config.videoUrl as string | undefined
   const backgroundImage = config.backgroundImage as string | undefined
+  const kicker = (config.kicker as string) || (config.badgeText as string) || ""
   const bannerTitle = (config.bannerTitle as string) || ""
   const description = (config.bannerDescription as string) || ""
   const buttonText = (config.buttonText as string) || ""
-  const buttonUrl = (config.buttonUrl as string) || "#"
+  const buttonUrl = sanitizeBannerUrl(config.buttonUrl as string | undefined) || "#"
 
   return (
-    <section className="relative overflow-hidden py-20" style={{ minHeight: "300px" }}>
+    <section className="relative overflow-hidden py-24 bg-black" style={{ minHeight: "360px" }}>
       {videoUrl ? (
         <video autoPlay muted loop playsInline className="absolute inset-0 w-full h-full object-cover">
           <source src={videoUrl} type="video/mp4" />
         </video>
       ) : backgroundImage ? (
         <div className="absolute inset-0">
-          <Image src={backgroundImage} alt="" fill className="object-cover" />
+          <Image src={backgroundImage} alt="" fill className="object-cover" referrerPolicy="no-referrer" />
         </div>
       ) : (
         <div className="absolute inset-0 bg-black" />
       )}
-      <div className="absolute inset-0 bg-black/60" />
-      <div className="relative max-w-7xl mx-auto px-6 text-center">
+      <div className="absolute inset-0 bg-black/55" />
+      <div
+        aria-hidden="true"
+        className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/20 to-black/35 pointer-events-none"
+      />
+      <div className="relative z-10 max-w-5xl mx-auto px-6 sm:px-10 text-center flex flex-col items-center">
+        {kicker && <BannerKicker text={kicker} align="center" className="mb-4" />}
         {bannerTitle && (
-          <h2 className="text-3xl md:text-5xl font-bold text-white mb-4">{bannerTitle}</h2>
+          <h2
+            className="font-black uppercase tracking-[-0.02em] leading-[1.03] text-white [text-wrap:balance] drop-shadow-[0_6px_26px_rgba(0,0,0,0.65)]"
+            style={{
+              fontSize: "clamp(2.1rem, 5.4vw, 4rem)",
+              fontFamily: "var(--global-font, var(--font-montserrat, Montserrat, sans-serif))",
+            }}
+          >
+            {bannerTitle}
+          </h2>
         )}
         {description && (
-          <p className="text-lg text-gray-300 mb-8 max-w-2xl mx-auto">{description}</p>
+          <p className="mt-4 text-sm sm:text-base md:text-lg font-medium tracking-[0.03em] text-white/85 max-w-2xl mx-auto leading-relaxed">
+            {description}
+          </p>
         )}
         {buttonText && (
           <Link
             href={buttonUrl}
-            className="inline-flex items-center px-8 py-4 font-bold text-white text-lg transition-all hover:opacity-90 hover:scale-105"
+            className="mt-8 inline-flex items-center gap-2.5 px-9 py-4 font-extrabold text-white text-xs sm:text-sm uppercase tracking-[0.2em] transition-opacity hover:opacity-90"
             style={{ backgroundColor: "var(--brand-color, #E03E54)" }}
           >
-            {buttonText}
+            <span>{buttonText}</span>
+            <ArrowRight className="size-4" />
           </Link>
         )}
       </div>

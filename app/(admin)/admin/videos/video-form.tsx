@@ -305,9 +305,12 @@ export function VideoForm({ video, performers, categories, products, subscriptio
       limitedAccessUntil: video?.limitedAccessUntil
         ? new Date(video.limitedAccessUntil).toISOString().split("T")[0]
         : "",
-      releaseDate: video?.releaseDate
-        ? new Date(video.releaseDate).toISOString().split("T")[0]
-        : new Date().toISOString().split("T")[0],
+      releaseDate: (() => {
+        const d = video?.releaseDate ? new Date(video.releaseDate) : new Date()
+        if (Number.isNaN(d.getTime())) return ""
+        const pad = (n: number) => String(n).padStart(2, "0")
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+      })(),
       // Preview settings (Mux MP4)
       previewStartTime: video?.previewStartTime ?? 0,
       previewEndTime: video?.previewEndTime ?? 5,
@@ -713,8 +716,13 @@ export function VideoForm({ video, performers, categories, products, subscriptio
     setIsSubmitting(true)
 
     try {
+      const parsedReleaseDate = data.releaseDate ? new Date(data.releaseDate) : null
       const payload = {
         ...data,
+        releaseDate:
+          parsedReleaseDate && !Number.isNaN(parsedReleaseDate.getTime())
+            ? parsedReleaseDate.toISOString()
+            : data.releaseDate,
         performerIds: selectedPerformers,
         categoryIds: selectedCategories,
         productIds: selectedProducts,
@@ -1295,12 +1303,15 @@ export function VideoForm({ video, performers, categories, products, subscriptio
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="releaseDate">Fecha de publicación</Label>
+                <Label htmlFor="releaseDate">Fecha y hora de estreno</Label>
                 <Input
                   id="releaseDate"
-                  type="date"
+                  type="datetime-local"
                   {...register("releaseDate")}
                 />
+                <p className="text-xs text-muted-foreground">
+                  Se utiliza para el contador de Upcoming Scene y estrenos programados.
+                </p>
               </div>
             </CardContent>
           </Card>

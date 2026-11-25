@@ -32,5 +32,8 @@ export { CastingRejectedTemplate } from "./casting/rejected"
 // Performer templates
 export { PerformerAvailableTemplate } from "./performers/available"
 
+// Video templates
+export { VideoAvailableTemplate } from "./videos/available"
+
 // Base components
 export { BaseEmail, EmailButton, EmailHeading, EmailText, EmailInfoBox } from "./base"

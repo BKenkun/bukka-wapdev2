@@ -39,7 +39,7 @@ const sectionTypeConfig: Record<string, TypeConfig> = {
   VIDEO_GRID: { label: "Grid de Vídeos", icon: IconVideo, color: "text-blue-500" },
   ACTRESS_GRID: { label: "Grid de Modelos", icon: IconUsers, color: "text-pink-500" },
   CTA_BANNER: { label: "Banner CTA", icon: IconBrandCampaignmonitor, color: "text-orange-500" },
-  COUNTDOWN: { label: "Cuenta Atrás", icon: IconClock, color: "text-green-500" },
+  COUNTDOWN: { label: "Upcoming Scene", icon: IconClock, color: "text-green-500" },
   CATEGORY_FEATURED: { label: "Categoría Destacada", icon: IconLayoutGrid, color: "text-yellow-500" },
 }
 
@@ -198,11 +198,25 @@ export function HomeSectionList({ sections, pages, tags }: HomeSectionListProps)
                     {(section.config as { title?: string }).title || "Sin título"}
                   </p>
                 )}
-                {section.type === "COUNTDOWN" && section.config && (
-                  <p className="text-sm text-muted-foreground mt-1">
-                    Fecha: {(section.config as { targetDate?: string }).targetDate || "N/A"}
-                  </p>
-                )}
+                {section.type === "COUNTDOWN" && section.config && (() => {
+                  const cfg = section.config as {
+                    mode?: string
+                    videoId?: string
+                    videoTitle?: string
+                    targetDate?: string
+                    newReleaseWindowDays?: number
+                  }
+                  const effectiveMode = cfg.mode || (cfg.videoId ? "auto" : cfg.targetDate ? "manual" : "auto")
+                  return (
+                    <p className="text-sm text-muted-foreground mt-1 truncate">
+                      {effectiveMode === "auto"
+                        ? cfg.videoTitle
+                          ? `Automático · Vídeo: ${cfg.videoTitle}`
+                          : "Automático · Piloto automático (próximo estreno / último vídeo)"
+                        : `Manual · Fecha: ${cfg.targetDate || "Sin fecha"}`}
+                    </p>
+                  )
+                })()}
               </div>
 
               <div className="flex items-center gap-2">

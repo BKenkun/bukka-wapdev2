@@ -10,6 +10,8 @@ import { CountdownTimer } from "@/components/countdown-timer"
 import { getVideoToken, getVideoPreviewUrl } from "@/lib/mux/client"
 import { releaseDuePerformers } from "@/lib/performer-release"
 import { isPerformerNew, isPerformerScheduled } from "@/lib/performer-status"
+import { resolveUpcomingScene, type CountdownSectionConfig } from "@/lib/upcoming-scene"
+import type { BannerContentPosition } from "@/lib/banner-utils"
 
 interface HomeSection {
   id: string
@@ -49,6 +51,7 @@ interface HeroConfig {
 }
 
 interface CtaBannerConfig {
+  kicker?: string
   title?: string
   description?: string
   buttonText?: string
@@ -61,6 +64,7 @@ interface CtaBannerConfig {
   dbVideoTitle?: string
   dbVideoThumbnail?: string
   dbVideoMuxPlaybackId?: string
+  dbVideoCategory?: string
   titleFontFamily?: string
   titleFontSize?: number
   buttonBgColor?: string
@@ -69,26 +73,11 @@ interface CtaBannerConfig {
   buttonHoverTextColor?: string
   overlayEnabled?: boolean
   overlayOpacity?: number
+  overlayColor?: string
   blurEnabled?: boolean
   blurIntensity?: number
   height?: number
-  contentPosition?: string
-}
-
-interface CountdownConfig {
-  targetDate?: string
-  title?: string
-  subtitle?: string
-  backgroundImage?: string
-  videoUrl?: string
-  height?: number
-  contentPosition?: "top-left" | "top-center" | "top-right" | "center-left" | "center" | "center-right" | "bottom-left" | "bottom-center" | "bottom-right"
-  overlayEnabled?: boolean
-  overlayOpacity?: number
-  blurEnabled?: boolean
-  blurIntensity?: number
-  titleFontFamily?: string
-  titleFontSize?: number
+  contentPosition?: BannerContentPosition
 }
 
 interface Performer {
@@ -524,13 +513,24 @@ export async function HomeSectionRenderer({ section }: HomeSectionRendererProps)
         }
       }
 
+      const resolvedKicker =
+        ctaConfig.kicker?.trim() ||
+        (ctaConfig.bgSource === "dbVideo" && ctaConfig.dbVideoCategory
+          ? `FEATURED SCENE | ${ctaConfig.dbVideoCategory.toUpperCase()}`
+          : undefined)
+
       return (
         <CtaBanner
+          kicker={resolvedKicker}
           title={ctaConfig.title || ""}
           description={ctaConfig.description || ""}
           buttonText={ctaConfig.buttonText || "See more"}
           buttonUrl={ctaConfig.buttonUrl}
-          backgroundImage={ctaConfig.bgSource === "image" || !ctaConfig.bgSource ? ctaConfig.backgroundImage : undefined}
+          backgroundImage={
+            ctaConfig.bgSource === "image" || !ctaConfig.bgSource
+              ? ctaConfig.backgroundImage
+              : ctaConfig.dbVideoThumbnail || ctaConfig.backgroundImage
+          }
           videoUrl={ctaConfig.bgSource === "uploadedVideo" ? ctaConfig.videoUrl : dbVideoUrl}
           titleFontFamily={ctaConfig.titleFontFamily}
           titleFontSize={ctaConfig.titleFontSize}
@@ -540,31 +540,35 @@ export async function HomeSectionRenderer({ section }: HomeSectionRendererProps)
           buttonHoverTextColor={ctaConfig.buttonHoverTextColor}
           overlayEnabled={ctaConfig.overlayEnabled}
           overlayOpacity={ctaConfig.overlayOpacity}
+          overlayColor={ctaConfig.overlayColor}
           blurEnabled={ctaConfig.blurEnabled}
           blurIntensity={ctaConfig.blurIntensity}
           height={ctaConfig.height}
-          contentPosition={ctaConfig.contentPosition as any}
+          contentPosition={ctaConfig.contentPosition}
         />
       )
     }
 
     case "COUNTDOWN": {
-      const countdownConfig = config as CountdownConfig
+      const countdownConfig = config as CountdownSectionConfig
+      const resolved = await resolveUpcomingScene(countdownConfig)
+
       return (
         <CountdownTimer
-          targetDate={countdownConfig.targetDate}
-          title={countdownConfig.title}
-          subtitle={countdownConfig.subtitle}
-          backgroundImage={countdownConfig.backgroundImage}
-          videoUrl={countdownConfig.videoUrl}
+          resolved={resolved}
           height={countdownConfig.height}
           contentPosition={countdownConfig.contentPosition}
           overlayEnabled={countdownConfig.overlayEnabled}
           overlayOpacity={countdownConfig.overlayOpacity}
+          overlayColor={countdownConfig.overlayColor}
           blurEnabled={countdownConfig.blurEnabled}
           blurIntensity={countdownConfig.blurIntensity}
           titleFontFamily={countdownConfig.titleFontFamily}
           titleFontSize={countdownConfig.titleFontSize}
+          buttonBgColor={countdownConfig.buttonBgColor}
+          buttonHoverColor={countdownConfig.buttonHoverColor}
+          buttonTextColor={countdownConfig.buttonTextColor}
+          buttonHoverTextColor={countdownConfig.buttonHoverTextColor}
         />
       )
     }

@@ -534,6 +534,14 @@ export function ShopSectionEditor({ section, categories, onSave, onClose }: Shop
                 />
               </div>
               <div className="space-y-2">
+                <Label>Etiqueta superior / Kicker (opcional)</Label>
+                <Input
+                  value={(config.kicker as string) || ""}
+                  onChange={(e) => updateConfig("kicker", e.target.value)}
+                  placeholder="Ej: LIMITED DROP | MERCH"
+                />
+              </div>
+              <div className="space-y-2">
                 <Label>Texto del banner</Label>
                 <Input
                   value={(config.bannerTitle as string) || ""}

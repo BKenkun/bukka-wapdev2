@@ -30,6 +30,8 @@ export type EmailTemplate =
   | "contact/notification"
   // Performer
   | "performer/available"
+  // Video
+  | "video/available"
   // Admin
   | "admin/new-casting"
   | "admin/new-order"
@@ -96,5 +98,6 @@ export const DEFAULT_EMAIL_SETTINGS: EmailSettings = {
     "casting/accepted": { subject: "Your application has been accepted", enabled: true },
     "casting/rejected": { subject: "Update on your application", enabled: true },
     "performer/available": { subject: "{performerName} is now available on BUKKAKERY!", enabled: true },
+    "video/available": { subject: "NEW SCENE: {videoTitle} is now live on BUKKAKERY!", enabled: true },
   },
 }

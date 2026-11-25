@@ -3,10 +3,12 @@ import { prisma } from "@/lib/prisma"
 import { createAdminNotification } from "@/lib/admin-notifications"
 import { sendTemplateEmail, RenewalReminderTemplate, SubscriptionExpiredTemplate } from "@/lib/email"
 import { releaseDuePerformers } from "@/lib/performer-release"
+import { releaseDueVideos } from "@/lib/video-release"
 
 /**
  * Daily cron endpoint. Runs:
  *  - Performer release: comingSoon=true con comingSoonDate <= ahora -> libera y envía emails.
+ *  - Video release: status=SCHEDULED con releaseDate <= ahora -> publica y envía emails.
  *  - Renewal reminder: subscriptionEnd en 3 días (±12h).
  *  - Subscription expired: subscriptionEnd < ahora y plan aún asignado.
  *
@@ -25,6 +27,11 @@ export async function POST(request: NextRequest) {
   const now = new Date()
 
   const performerRelease = await releaseDuePerformers({
+    force: true,
+    awaitNotifications: true,
+  })
+
+  const videoRelease = await releaseDueVideos({
     force: true,
     awaitNotifications: true,
   })
@@ -124,6 +131,8 @@ export async function POST(request: NextRequest) {
     ok: true,
     performersReleased: performerRelease.releasedCount,
     performerNotificationsSent: performerRelease.notifiedEmails,
+    videosReleased: videoRelease.releasedCount,
+    videoNotificationsSent: videoRelease.notifiedEmails,
     remindersSent,
     expiredCleared,
     now: now.toISOString(),

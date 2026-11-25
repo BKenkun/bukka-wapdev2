@@ -760,6 +760,7 @@ model User {
   EmailVerificationToken                       EmailVerificationToken[]
   PasswordResetToken                           PasswordResetToken[]
   PerformerNotify                              PerformerNotify[]
+  VideoNotify                                  VideoNotify[]
   ContentReport                                ContentReport[]
 }
 
@@ -811,6 +812,22 @@ model Video {
   tags               VideoTag[]
   categories         VideoToCategory[]
   watchHistory       WatchHistory[]
+  notifications      VideoNotify[]
+}
+
+model VideoNotify {
+  id         String    @id @default(cuid())
+  userId     String
+  videoId    String
+  notified   Boolean   @default(false)
+  notifiedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, videoId])
+  @@index([videoId, notified])
 }
 
 model VideoCategory {
