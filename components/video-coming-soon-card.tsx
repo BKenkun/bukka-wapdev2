@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation"
 import { Bell, Calendar, Check, Loader2 } from "lucide-react"
 import { useCountdown } from "@/components/coming-soon-card"
 import { useAuthModal } from "@/components/auth/auth-modal-provider"
+import { getOptimizedImageUrl } from "@/lib/cloudflare-image-loader"
 import { safeParseJson } from "@/lib/safe-json"
 
 interface Performer {
@@ -128,8 +129,11 @@ export function VideoComingSoonCard({
     >
       {imageUrl ? (
         <img
-          src={imageUrl}
+          src={getOptimizedImageUrl(imageUrl, 800)}
           alt={title}
+          loading="lazy"
+          decoding="async"
+          referrerPolicy="no-referrer"
           className="absolute inset-0 w-full h-full object-cover object-left brightness-[0.3] transition-transform duration-500 group-hover:scale-105"
         />
       ) : (

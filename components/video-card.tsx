@@ -7,6 +7,7 @@ import { useSubscription } from "@/hooks/use-subscription"
 import { useAuthModal } from "@/components/auth/auth-modal-provider"
 import { VideoComingSoonCard } from "@/components/video-coming-soon-card"
 import { shouldApplyTrailerLimit } from "@/lib/video-access"
+import { getOptimizedImageUrl } from "@/lib/cloudflare-image-loader"
 
 // Play icon SVG component
 function PlayIcon({ className }: { className?: string }) {
@@ -493,8 +494,11 @@ export function VideoCard({
 
           {/* Thumbnail image — stays visible until preview is actually playing */}
           <img
-            src={imageUrl || "/placeholder.svg"}
+            src={getOptimizedImageUrl(imageUrl || "/placeholder.svg", featured ? 1280 : 800)}
             alt={title}
+            loading="lazy"
+            decoding="async"
+            referrerPolicy="no-referrer"
             className={`absolute inset-0 w-full h-full object-cover object-left transition-all duration-300 ${
               showActivePreview ? "opacity-0" : "opacity-100 group-hover:scale-105"
             }`}
@@ -572,8 +576,11 @@ export function VideoCard({
 
         {/* Thumbnail image — stays visible until preview is actually playing */}
         <img
-          src={imageUrl || "/placeholder.svg"}
+          src={getOptimizedImageUrl(imageUrl || "/placeholder.svg", featured ? 1280 : 800)}
           alt={title}
+          loading="lazy"
+          decoding="async"
+          referrerPolicy="no-referrer"
           className={`absolute inset-0 w-full h-full object-cover ${mediaObjectPosition} transition-opacity duration-300 ${
             showActivePreview ? "opacity-0" : "opacity-100"
           }`}

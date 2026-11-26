@@ -24,7 +24,10 @@ const nextConfig = {
     ignoreBuildErrors: true,
   },
   images: {
-    unoptimized: true,
+    loader: 'custom',
+    loaderFile: './lib/cloudflare-image-loader.ts',
+    deviceSizes: [800, 1280, 1920],
+    imageSizes: [480],
   },
   serverExternalPackages: [
     '@prisma/client',

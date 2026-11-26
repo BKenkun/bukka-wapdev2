@@ -2,6 +2,7 @@
 
 import Link from "next/link"
 import type { MegamenuProduct } from "@/types/megamenu"
+import { getOptimizedImageUrl } from "@/lib/cloudflare-image-loader"
 
 interface MegamenuProductCardProps {
   product: MegamenuProduct
@@ -17,8 +18,11 @@ export function MegamenuProductCard({ product }: MegamenuProductCardProps) {
       <div className="relative aspect-[3/4] overflow-hidden bg-zinc-800">
         {product.images?.[0] ? (
           <img
-            src={product.images[0]}
+            src={getOptimizedImageUrl(product.images[0], 480)}
             alt={product.name}
+            loading="lazy"
+            decoding="async"
+            referrerPolicy="no-referrer"
             className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
           />
         ) : (

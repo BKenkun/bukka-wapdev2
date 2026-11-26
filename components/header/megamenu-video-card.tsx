@@ -3,6 +3,7 @@
 import { useState } from "react"
 import Link from "next/link"
 import type { MegamenuVideo } from "@/types/megamenu"
+import { getOptimizedImageUrl } from "@/lib/cloudflare-image-loader"
 
 interface MegamenuVideoCardProps {
   video: MegamenuVideo
@@ -29,8 +30,11 @@ export function MegamenuVideoCard({ video }: MegamenuVideoCardProps) {
           vertical se recortaban tanto que no se distinguía el video */}
       <div className="relative aspect-video overflow-hidden bg-zinc-900">
         <img
-          src={video.thumbnailUrl}
+          src={getOptimizedImageUrl(video.thumbnailUrl, 480)}
           alt={video.title}
+          loading="lazy"
+          decoding="async"
+          referrerPolicy="no-referrer"
           className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
         />
 

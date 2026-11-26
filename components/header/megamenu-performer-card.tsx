@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import Link from "next/link"
 import { ComingSoonCard } from "@/components/coming-soon-card"
 import type { MegamenuPerformer } from "@/types/megamenu"
+import { getOptimizedImageUrl } from "@/lib/cloudflare-image-loader"
 
 interface MegamenuPerformerCardProps {
   performer: MegamenuPerformer
@@ -82,8 +83,11 @@ export function MegamenuPerformerCard({ performer }: MegamenuPerformerCardProps)
       <div className="relative aspect-[3/4] overflow-hidden bg-zinc-800">
         {performer.profileImage ? (
           <img
-            src={performer.profileImage}
+            src={getOptimizedImageUrl(performer.profileImage, 480)}
             alt={performer.name}
+            loading="lazy"
+            decoding="async"
+            referrerPolicy="no-referrer"
             className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
           />
         ) : (
