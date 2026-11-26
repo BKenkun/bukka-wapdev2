@@ -36,8 +36,40 @@ interface MuxVideoPlayerProps {
 }
 
 interface PlaybackTokenResponse {
-  token: string
+  token: string | null
+  configured?: boolean
+  code?: string
   error?: string
+}
+
+async function fetchJsonWithRetry<T>(
+  url: string,
+  retries = 1
+): Promise<{ ok: boolean; status: number; data: T | null; nonJson: boolean }> {
+  let lastStatus = 0
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const response = await fetch(url, {
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    })
+    lastStatus = response.status
+    const contentType = response.headers.get("content-type") || ""
+
+    if (contentType.includes("application/json")) {
+      try {
+        const data = (await response.json()) as T
+        return { ok: response.ok, status: response.status, data, nonJson: false }
+      } catch {
+        // Fall through to retry if JSON body was truncated
+      }
+    }
+
+    if (attempt < retries) {
+      await new Promise((resolve) => setTimeout(resolve, 650))
+    }
+  }
+
+  return { ok: false, status: lastStatus, data: null, nonJson: true }
 }
 
 export function MuxVideoPlayer({
@@ -95,33 +127,57 @@ export function MuxVideoPlayer({
   const [thumbnailToken, setThumbnailToken] = useState<string>()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>()
+  const [retryCount, setRetryCount] = useState(0)
 
   // Fetch playback tokens from server
   useEffect(() => {
+    let cancelled = false
+
     async function fetchTokens() {
       try {
         setLoading(true)
         setError(undefined)
 
-        const response = await fetch(`/api/videos/${videoSlug}/stream`)
-        const data: PlaybackTokenResponse = await response.json()
+        const encodedSlug = encodeURIComponent(videoSlug)
+        const streamResult = await fetchJsonWithRetry<PlaybackTokenResponse>(
+          `/api/videos/${encodedSlug}/stream`,
+          1
+        )
 
-        if (!response.ok || data.error) {
+        if (cancelled) return
+
+        if (streamResult.nonJson || !streamResult.data) {
+          throw new Error("Could not connect to the video server. Please try again.")
+        }
+
+        const data = streamResult.data
+
+        if (!streamResult.ok || data.error || data.configured === false || !data.token) {
           throw new Error(data.error || "Failed to get playback token")
         }
 
         setPlaybackToken(data.token)
 
-        // Fetch thumbnail token
-        const thumbResponse = await fetch(`/api/videos/${videoSlug}/thumbnail-token`)
-        if (thumbResponse.ok) {
-          const thumbData = await thumbResponse.json()
-          setThumbnailToken(thumbData.token)
+        // Fetch thumbnail token independently so a failure never breaks video playback
+        try {
+          const thumbResult = await fetchJsonWithRetry<{ token?: string | null }>(
+            `/api/videos/${encodedSlug}/thumbnail-token`,
+            0
+          )
+          if (!cancelled && thumbResult.ok && thumbResult.data?.token) {
+            setThumbnailToken(thumbResult.data.token)
+          }
+        } catch {
+          // Optional thumbnail token failed; poster fallback still works
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Error loading video")
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Error loading video")
+        }
       } finally {
-        setLoading(false)
+        if (!cancelled) {
+          setLoading(false)
+        }
       }
     }
 
@@ -130,7 +186,11 @@ export function MuxVideoPlayer({
     } else {
       setLoading(false)
     }
-  }, [videoSlug, playbackId, locked])
+
+    return () => {
+      cancelled = true
+    }
+  }, [videoSlug, playbackId, locked, retryCount])
 
   // Handle time update for progress tracking
   const handleTimeUpdate = useCallback(
@@ -233,8 +293,9 @@ export function MuxVideoPlayer({
         <AlertCircle className="w-12 h-12 text-red-500" />
         <p className="text-white text-center">{error}</p>
         <button
-          onClick={() => window.location.reload()}
-          className="px-4 py-2 font-medium transition-colors"
+          type="button"
+          onClick={() => setRetryCount((c) => c + 1)}
+          className="px-4 py-2 font-medium transition-colors cursor-pointer"
           style={{ backgroundColor: "var(--brand-color)", color: "var(--text-primary)" }}
         >
           Reintentar
@@ -265,7 +326,11 @@ export function MuxVideoPlayer({
       `}</style>
       <MuxPlayer
         playbackId={playbackId}
-        tokens={{ playback: playbackToken, thumbnail: thumbnailToken }}
+        tokens={
+          thumbnailToken
+            ? { playback: playbackToken, thumbnail: thumbnailToken }
+            : { playback: playbackToken }
+        }
         envKey={process.env.NEXT_PUBLIC_MUX_DATA_ENV_KEY}
         metadata={{
           video_id: videoId,

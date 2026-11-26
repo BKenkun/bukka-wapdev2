@@ -56,6 +56,12 @@ interface RelatedVideo {
   previewStartTime?: number
   previewEndTime?: number
   isVerified: boolean
+  category?: string
+  performers?: Array<{ name: string; slug: string }>
+  publishedAt?: string
+  comingSoon?: boolean
+  releaseDate?: string | null
+  isNew?: boolean
   minTierLevel?: number | null
   isDiamondExclusive?: boolean
   isLimitedEdition?: boolean
@@ -169,28 +175,47 @@ export function VideoDetailLayout({
                 previewEndTime?: number
                 viewCount: number
                 likeCount: number
+                releaseDate?: string | null
+                comingSoon?: boolean
+                isNew?: boolean
                 minTierPlan?: { level: number } | null
                 isDiamondExclusive?: boolean
                 isLimitedEdition?: boolean
                 limitedAccessUntil?: string | null
-                performers?: Array<{ name?: string; performer?: { name: string } }>
-              }) => ({
-                id: v.id,
-                slug: v.slug,
-                title: v.title,
-                subtitle: v.performers?.[0]?.name || v.performers?.[0]?.performer?.name || "",
-                views: formatViews(v.viewCount),
-                likes: `${Math.min(99, Math.round((v.likeCount / Math.max(v.viewCount, 1)) * 100 + 80))}%`,
-                imageUrl: v.thumbnailUrl || "/placeholder-video.jpg",
-                previewUrl: v.previewUrl || undefined,
-                previewStartTime: v.previewStartTime,
-                previewEndTime: v.previewEndTime,
-                isVerified: true,
-                minTierLevel: v.minTierPlan?.level ?? 0,
-                isDiamondExclusive: v.isDiamondExclusive ?? false,
-                isLimitedEdition: v.isLimitedEdition ?? false,
-                limitedAccessUntil: v.limitedAccessUntil ?? null,
-              })
+                categories?: Array<{ name?: string; category?: { name: string } }>
+                performers?: Array<{ name?: string; slug?: string; performer?: { name: string; slug: string } }>
+              }) => {
+                const mappedPerformers = (v.performers || [])
+                  .map((p) => ({
+                    name: p.name || p.performer?.name || "",
+                    slug: p.slug || p.performer?.slug || "",
+                  }))
+                  .filter((p) => Boolean(p.name && p.slug))
+
+                return {
+                  id: v.id,
+                  slug: v.slug,
+                  title: v.title,
+                  subtitle: mappedPerformers[0]?.name || "",
+                  views: formatViews(v.viewCount),
+                  likes: `${Math.min(99, Math.round((v.likeCount / Math.max(v.viewCount, 1)) * 100 + 80))}%`,
+                  imageUrl: v.thumbnailUrl || "/placeholder-video.jpg",
+                  previewUrl: v.previewUrl || undefined,
+                  previewStartTime: v.previewStartTime,
+                  previewEndTime: v.previewEndTime,
+                  isVerified: true,
+                  category: v.categories?.[0]?.name || v.categories?.[0]?.category?.name,
+                  performers: mappedPerformers,
+                  publishedAt: v.releaseDate ?? undefined,
+                  comingSoon: Boolean(v.comingSoon),
+                  releaseDate: v.releaseDate ?? null,
+                  isNew: Boolean(v.isNew),
+                  minTierLevel: v.minTierPlan?.level ?? 0,
+                  isDiamondExclusive: v.isDiamondExclusive ?? false,
+                  isLimitedEdition: v.isLimitedEdition ?? false,
+                  limitedAccessUntil: v.limitedAccessUntil ?? null,
+                }
+              }
             )
           )
         }

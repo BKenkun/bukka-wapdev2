@@ -10,18 +10,22 @@ export const mux = new Mux({
   tokenSecret: process.env.MUX_TOKEN_SECRET,
 })
 
-// Claves para firmar JWTs
-const signingKeyId = process.env.MUX_SIGNING_KEY_ID
-const signingKeySecret = process.env.MUX_SIGNING_KEY_PRIVATE
+// Helper para leer credenciales de firma JWT dinámicamente en runtime
+function getMuxSigningCredentials(): { keyId: string; keySecret: string } | null {
+  const keyId = process.env.MUX_SIGNING_KEY_ID?.trim()
+  const rawSecret = process.env.MUX_SIGNING_KEY_PRIVATE?.trim()
+  if (!keyId || !rawSecret) {
+    return null
+  }
+  const keySecret = rawSecret.includes("\\n") ? rawSecret.replace(/\\n/g, "\n") : rawSecret
+  return { keyId, keySecret }
+}
 
 /**
  * Indica si las claves de firma JWT de Mux están configuradas en el entorno.
  */
 export function isMuxSigningConfigured(): boolean {
-  return Boolean(
-    (signingKeyId || process.env.MUX_SIGNING_KEY_ID) &&
-    (signingKeySecret || process.env.MUX_SIGNING_KEY_PRIVATE)
-  )
+  return getMuxSigningCredentials() !== null
 }
 
 export interface CreateUploadResult {
@@ -70,14 +74,15 @@ export async function getSignedPlaybackUrl(
   playbackId: string,
   userId?: string
 ): Promise<string> {
-  if (!signingKeyId || !signingKeySecret) {
+  const creds = getMuxSigningCredentials()
+  if (!creds) {
     throw new Error("MUX_SIGNING_KEY_ID or MUX_SIGNING_KEY_PRIVATE not configured")
   }
 
   // Crear JWT para playback firmado
   const token = await mux.jwt.signPlaybackId(playbackId, {
-    keyId: signingKeyId,
-    keySecret: signingKeySecret,
+    keyId: creds.keyId,
+    keySecret: creds.keySecret,
     type: "video",
     expiration: "30m",
     params: {
@@ -120,13 +125,14 @@ export async function getPlaybackToken(
   userId?: string,
   maxResolution?: MuxMaxResolution
 ): Promise<string> {
-  if (!signingKeyId || !signingKeySecret) {
+  const creds = getMuxSigningCredentials()
+  if (!creds) {
     throw new Error("MUX_SIGNING_KEY_ID or MUX_SIGNING_KEY_PRIVATE not configured")
   }
 
   return await mux.jwt.signPlaybackId(playbackId, {
-    keyId: signingKeyId,
-    keySecret: signingKeySecret,
+    keyId: creds.keyId,
+    keySecret: creds.keySecret,
     type: "video",
     expiration: "30m",
     params: {
@@ -141,13 +147,14 @@ export async function getPlaybackToken(
  * Genera un token para thumbnails firmados
  */
 export async function getThumbnailToken(playbackId: string): Promise<string> {
-  if (!signingKeyId || !signingKeySecret) {
+  const creds = getMuxSigningCredentials()
+  if (!creds) {
     throw new Error("MUX_SIGNING_KEY_ID or MUX_SIGNING_KEY_PRIVATE not configured")
   }
 
   return await mux.jwt.signPlaybackId(playbackId, {
-    keyId: signingKeyId,
-    keySecret: signingKeySecret,
+    keyId: creds.keyId,
+    keySecret: creds.keySecret,
     type: "thumbnail",
     expiration: "2h",
   })
@@ -167,13 +174,14 @@ export interface GifOptions {
  * Genera un token para GIFs animados firmados
  */
 export async function getGifToken(playbackId: string): Promise<string> {
-  if (!signingKeyId || !signingKeySecret) {
+  const creds = getMuxSigningCredentials()
+  if (!creds) {
     throw new Error("MUX_SIGNING_KEY_ID or MUX_SIGNING_KEY_PRIVATE not configured")
   }
 
   return await mux.jwt.signPlaybackId(playbackId, {
-    keyId: signingKeyId,
-    keySecret: signingKeySecret,
+    keyId: creds.keyId,
+    keySecret: creds.keySecret,
     type: "gif",
     expiration: "2h",
   })
@@ -280,15 +288,14 @@ export function getVideoPreviewUrl(
  * Genera token para video MP4 (válido 2h para que los previews en hover no caduquen a los 5 minutos)
  */
 export async function getVideoToken(playbackId: string): Promise<string> {
-  const keyId = signingKeyId || process.env.MUX_SIGNING_KEY_ID
-  const keySecret = signingKeySecret || process.env.MUX_SIGNING_KEY_PRIVATE
-  if (!keyId || !keySecret) {
+  const creds = getMuxSigningCredentials()
+  if (!creds) {
     throw new Error("MUX_SIGNING_KEY_ID or MUX_SIGNING_KEY_PRIVATE not configured")
   }
 
   return await mux.jwt.signPlaybackId(playbackId, {
-    keyId,
-    keySecret,
+    keyId: creds.keyId,
+    keySecret: creds.keySecret,
     type: "video",
     expiration: "2h",
   })

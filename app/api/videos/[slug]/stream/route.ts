@@ -109,10 +109,16 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     if (!isMuxSigningConfigured()) {
       return NextResponse.json(
         {
-          error: "Video streaming is not configured in this environment",
+          token: null,
+          playbackId: video.muxPlaybackId,
+          configured: false,
           code: "MUX_NOT_CONFIGURED",
+          error: "Video streaming is not configured in this environment",
         },
-        { status: 503 }
+        {
+          status: 200,
+          headers: { "Cache-Control": "no-store" },
+        }
       )
     }
 
@@ -123,17 +129,23 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     // Generar token de playback con restricción de calidad
     const token = await getPlaybackToken(video.muxPlaybackId, user?.id, muxMaxResolution)
 
-    return NextResponse.json({
-      token,
-      playbackId: video.muxPlaybackId,
-      maxQuality: maxVideoQuality,
-      maxResolution: muxMaxResolution,
-    })
+    return NextResponse.json(
+      {
+        token,
+        playbackId: video.muxPlaybackId,
+        configured: true,
+        maxQuality: maxVideoQuality,
+        maxResolution: muxMaxResolution,
+      },
+      {
+        headers: { "Cache-Control": "no-store" },
+      }
+    )
   } catch (error) {
     console.error("Error getting stream token:", error)
     return NextResponse.json(
       { error: "Error fetching streaming token" },
-      { status: 500 }
+      { status: 500, headers: { "Cache-Control": "no-store" } }
     )
   }
 }
