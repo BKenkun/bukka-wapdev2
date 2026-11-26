@@ -1,6 +1,5 @@
 import { HomeSectionType } from "@prisma/client"
 import { prisma } from "@/lib/prisma"
-import { Hero } from "@/components/hero"
 import { SectionHeader } from "@/components/section-header"
 import { VideoGrid } from "@/components/video-grid"
 import { VideoCarousel } from "@/components/video-carousel"
@@ -18,7 +17,8 @@ import {
   isVideoScheduled,
 } from "@/lib/video-status"
 import { resolveUpcomingScene, type CountdownSectionConfig } from "@/lib/upcoming-scene"
-import type { BannerContentPosition } from "@/lib/banner-utils"
+import { resolveBannerSection } from "@/lib/banner-resolver"
+import type { UnifiedBannerConfig } from "@/lib/banner-config"
 
 interface HomeSection {
   id: string
@@ -49,43 +49,7 @@ interface ActressGridConfig {
   limit?: number
 }
 
-interface HeroConfig {
-  backgroundImage?: string
-  videoUrl?: string
-  linkUrl?: string
-  linkPageId?: string
-  openInNewTab?: boolean
-}
 
-interface CtaBannerConfig {
-  kicker?: string
-  title?: string
-  description?: string
-  buttonText?: string
-  buttonUrl?: string
-  backgroundImage?: string
-  videoUrl?: string
-  bgSource?: "image" | "uploadedVideo" | "dbVideo"
-  dbVideoId?: string
-  dbVideoSlug?: string
-  dbVideoTitle?: string
-  dbVideoThumbnail?: string
-  dbVideoMuxPlaybackId?: string
-  dbVideoCategory?: string
-  titleFontFamily?: string
-  titleFontSize?: number
-  buttonBgColor?: string
-  buttonHoverColor?: string
-  buttonTextColor?: string
-  buttonHoverTextColor?: string
-  overlayEnabled?: boolean
-  overlayOpacity?: number
-  overlayColor?: string
-  blurEnabled?: boolean
-  blurIntensity?: number
-  height?: number
-  contentPosition?: BannerContentPosition
-}
 
 interface Performer {
   name: string
@@ -494,26 +458,24 @@ export async function HomeSectionRenderer({ section }: HomeSectionRendererProps)
 
   switch (section.type) {
     case "HERO": {
-      const heroConfig = config as HeroConfig
-      let linkUrl = heroConfig.linkUrl
-
-      // If linkPageId is set, resolve the page URL
-      if (heroConfig.linkPageId) {
-        const page = await prisma.page.findUnique({
-          where: { id: heroConfig.linkPageId },
-          select: { slug: true },
-        })
-        if (page) {
-          linkUrl = `/${page.slug}`
-        }
-      }
+      const bannerConfig = config as UnifiedBannerConfig
+      const resolved = await resolveBannerSection(config, "HERO")
 
       return (
-        <Hero
-          backgroundImage={heroConfig.backgroundImage}
-          videoUrl={heroConfig.videoUrl}
-          linkUrl={linkUrl}
-          openInNewTab={heroConfig.openInNewTab}
+        <CtaBanner
+          slides={resolved.slides}
+          rotationMode={resolved.rotationMode}
+          sectionId={section.id}
+          fullHeight={resolved.fullHeight}
+          height={resolved.height}
+          headingTag="h1"
+          titleFontFamily={bannerConfig.titleFontFamily}
+          titleFontSize={bannerConfig.titleFontSize}
+          buttonBgColor={bannerConfig.buttonBgColor}
+          buttonHoverColor={bannerConfig.buttonHoverColor}
+          buttonTextColor={bannerConfig.buttonTextColor}
+          buttonHoverTextColor={bannerConfig.buttonHoverTextColor}
+          contentPosition={bannerConfig.contentPosition}
         />
       )
     }
@@ -554,51 +516,24 @@ export async function HomeSectionRenderer({ section }: HomeSectionRendererProps)
     }
 
     case "CTA_BANNER": {
-      const ctaConfig = config as CtaBannerConfig
-
-      // Si es vídeo de la BD con Mux, generar URL firmada para reproducción
-      let dbVideoUrl: string | undefined
-      if (ctaConfig.bgSource === "dbVideo" && ctaConfig.dbVideoMuxPlaybackId && isMuxSigningConfigured()) {
-        try {
-          const token = await getVideoToken(ctaConfig.dbVideoMuxPlaybackId)
-          dbVideoUrl = getVideoPreviewUrl(ctaConfig.dbVideoMuxPlaybackId, token, "capped-1080p")
-        } catch (error) {
-          console.warn("Failed to generate CTA banner video URL:", error)
-        }
-      }
-
-      const resolvedKicker =
-        ctaConfig.kicker?.trim() ||
-        (ctaConfig.bgSource === "dbVideo" && ctaConfig.dbVideoCategory
-          ? `FEATURED SCENE | ${ctaConfig.dbVideoCategory.toUpperCase()}`
-          : undefined)
+      const bannerConfig = config as UnifiedBannerConfig
+      const resolved = await resolveBannerSection(config, "CTA_BANNER")
 
       return (
         <CtaBanner
-          kicker={resolvedKicker}
-          title={ctaConfig.title || ""}
-          description={ctaConfig.description || ""}
-          buttonText={ctaConfig.buttonText || "See more"}
-          buttonUrl={ctaConfig.buttonUrl}
-          backgroundImage={
-            ctaConfig.bgSource === "image" || !ctaConfig.bgSource
-              ? ctaConfig.backgroundImage
-              : ctaConfig.dbVideoThumbnail || ctaConfig.backgroundImage
-          }
-          videoUrl={ctaConfig.bgSource === "uploadedVideo" ? ctaConfig.videoUrl : dbVideoUrl}
-          titleFontFamily={ctaConfig.titleFontFamily}
-          titleFontSize={ctaConfig.titleFontSize}
-          buttonBgColor={ctaConfig.buttonBgColor}
-          buttonHoverColor={ctaConfig.buttonHoverColor}
-          buttonTextColor={ctaConfig.buttonTextColor}
-          buttonHoverTextColor={ctaConfig.buttonHoverTextColor}
-          overlayEnabled={ctaConfig.overlayEnabled}
-          overlayOpacity={ctaConfig.overlayOpacity}
-          overlayColor={ctaConfig.overlayColor}
-          blurEnabled={ctaConfig.blurEnabled}
-          blurIntensity={ctaConfig.blurIntensity}
-          height={ctaConfig.height}
-          contentPosition={ctaConfig.contentPosition}
+          slides={resolved.slides}
+          rotationMode={resolved.rotationMode}
+          sectionId={section.id}
+          fullHeight={resolved.fullHeight}
+          height={resolved.height}
+          headingTag="h2"
+          titleFontFamily={bannerConfig.titleFontFamily}
+          titleFontSize={bannerConfig.titleFontSize}
+          buttonBgColor={bannerConfig.buttonBgColor}
+          buttonHoverColor={bannerConfig.buttonHoverColor}
+          buttonTextColor={bannerConfig.buttonTextColor}
+          buttonHoverTextColor={bannerConfig.buttonHoverTextColor}
+          contentPosition={bannerConfig.contentPosition}
         />
       )
     }

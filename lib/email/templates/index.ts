@@ -28,6 +28,8 @@ export { CastingReceivedTemplate } from "./casting/received"
 export { CastingReviewingTemplate } from "./casting/reviewing"
 export { CastingAcceptedTemplate } from "./casting/accepted"
 export { CastingRejectedTemplate } from "./casting/rejected"
+export { CastingCampaignOpenedTemplate } from "./casting/campaign-opened"
+export { CastingCampaignClosedTemplate } from "./casting/campaign-closed"
 
 // Performer templates
 export { PerformerAvailableTemplate } from "./performers/available"

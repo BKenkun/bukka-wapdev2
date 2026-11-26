@@ -4,6 +4,7 @@ import { createAdminNotification } from "@/lib/admin-notifications"
 import { sendTemplateEmail, RenewalReminderTemplate, SubscriptionExpiredTemplate } from "@/lib/email"
 import { releaseDuePerformers } from "@/lib/performer-release"
 import { releaseDueVideos } from "@/lib/video-release"
+import { processScheduledCastingCampaigns } from "@/lib/casting-campaigns"
 
 /**
  * Daily cron endpoint. Runs:
@@ -35,6 +36,8 @@ export async function POST(request: NextRequest) {
     force: true,
     awaitNotifications: true,
   })
+
+  const castingCampaigns = await processScheduledCastingCampaigns(now)
 
   // Ventana ±12h centrada a 3 días desde ahora → cada user la cruza 1 sola vez.
   const in3Days = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000)
@@ -133,6 +136,9 @@ export async function POST(request: NextRequest) {
     performerNotificationsSent: performerRelease.notifiedEmails,
     videosReleased: videoRelease.releasedCount,
     videoNotificationsSent: videoRelease.notifiedEmails,
+    castingOpenedSent: castingCampaigns.openedSent,
+    castingClosedSent: castingCampaigns.closedSent,
+    castingAutoClosed: castingCampaigns.autoClosedStatus,
     remindersSent,
     expiredCleared,
     now: now.toISOString(),

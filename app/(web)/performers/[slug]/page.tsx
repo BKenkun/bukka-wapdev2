@@ -10,8 +10,16 @@ import { isPerformerNew, isPerformerScheduled } from "@/lib/performer-status"
 import { releaseDueVideos } from "@/lib/video-release"
 import { getPublicVideoPoolWhere, isVideoNew, isVideoScheduled } from "@/lib/video-status"
 import { getVideoToken, getVideoPreviewUrl, isMuxSigningConfigured } from "@/lib/mux/client"
+import {
+  PERFORMER_PAGE_VIDEO_SELECT,
+  getDynamicRelatedVideosForPerformer,
+  type PerformerPageVideoRecord,
+} from "@/lib/performer-related-videos"
 import Image from "next/image"
 import Link from "next/link"
+import { ArrowRight } from "lucide-react"
+
+export const dynamic = "force-dynamic"
 
 interface ModelDetailPageProps {
   params: Promise<{
@@ -31,42 +39,19 @@ export default async function ModelDetailPage({ params }: ModelDetailPageProps) 
       User: { select: { isVerified: true } },
       PerformerPhoto: {
         orderBy: { order: "asc" },
-        take: 6,
+        select: {
+          id: true,
+          imageUrl: true,
+          caption: true,
+        },
       },
       VideoPerformer: {
         where: { video: getPublicVideoPoolWhere(now) },
         orderBy: { video: { releaseDate: "desc" } },
-        take: 10,
+        take: 20,
         include: {
           video: {
-            select: {
-              id: true,
-              slug: true,
-              title: true,
-              thumbnailUrl: true,
-              previewUrl: true,
-              duration: true,
-              viewCount: true,
-              likeCount: true,
-              muxPlaybackId: true,
-              previewStartTime: true,
-              previewEndTime: true,
-              status: true,
-              publishedAt: true,
-              releaseDate: true,
-              minTierPlan: { select: { level: true } },
-              isDiamondExclusive: true,
-              isLimitedEdition: true,
-              limitedAccessUntil: true,
-              categories: {
-                include: {
-                  category: {
-                    select: { name: true },
-                  },
-                },
-                take: 1,
-              },
-            },
+            select: PERFORMER_PAGE_VIDEO_SELECT,
           },
         },
       },
@@ -126,38 +111,85 @@ export default async function ModelDetailPage({ params }: ModelDetailPageProps) 
   const publishedVideos = allPerformerVideos.filter((v) => !isVideoScheduled(v, nowMs))
 
   const latestRelease = publishedVideos[0] || null
-  const otherVideos = [...upcomingVideos, ...publishedVideos.slice(1)].slice(0, 9)
+  const TARGET_RELATED_COUNT = 9
 
-  // Generate preview URLs for published videos with Mux playback IDs
-  const videosWithPreviews = await Promise.all(
-    otherVideos.map(async (video) => {
-      const scheduled = isVideoScheduled(video, nowMs)
-      let previewUrl: string | undefined = undefined
+  // Performer's own videos always come first (upcoming first, then newest published excluding latestRelease)
+  const ownRelatedVideos = [...upcomingVideos, ...publishedVideos.slice(1)].slice(0, TARGET_RELATED_COUNT)
+  const neededRelatedCount = Math.max(0, TARGET_RELATED_COUNT - ownRelatedVideos.length)
 
-      if (!scheduled) {
-        previewUrl = video.previewUrl || undefined
+  const excludedIds = Array.from(
+    new Set([
+      ...(latestRelease ? [latestRelease.id] : []),
+      ...ownRelatedVideos.map((v) => v.id),
+    ])
+  )
 
-        if (!previewUrl && video.muxPlaybackId && isMuxSigningConfigured()) {
-          try {
-            const token = await getVideoToken(video.muxPlaybackId)
-            previewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "capped-1080p")
-          } catch (error) {
-            console.error(`Error generating preview for video ${video.id}:`, error)
-          }
+  // Dynamically fill remaining slots with related videos (co-stars, categories, tags, similar views/likes, freshness + rotation)
+  const dynamicRelatedVideos =
+    neededRelatedCount > 0
+      ? await getDynamicRelatedVideosForPerformer({
+          performerId: performer.id,
+          ownVideos: allPerformerVideos,
+          excludeVideoIds: excludedIds,
+          limit: neededRelatedCount,
+          now,
+        })
+      : []
+
+  const combinedRelatedVideos = [...ownRelatedVideos, ...dynamicRelatedVideos]
+
+  // Generate preview URLs and card metadata for Latest Release and Related Videos
+  const enrichVideo = async (video: PerformerPageVideoRecord, isOwnVideo: boolean) => {
+    const scheduled = isVideoScheduled(video, nowMs)
+    let previewUrl: string | undefined = undefined
+
+    if (!scheduled) {
+      previewUrl = video.previewUrl || undefined
+
+      if (!previewUrl && video.muxPlaybackId && isMuxSigningConfigured()) {
+        try {
+          const token = await getVideoToken(video.muxPlaybackId)
+          previewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "capped-1080p")
+        } catch (error) {
+          console.error(`Error generating preview for video ${video.id}:`, error)
         }
       }
+    }
 
-      return {
-        ...video,
-        previewUrl,
-        comingSoon: scheduled,
-        isNew: isVideoNew(video, nowMs),
-        category: video.categories[0]?.category.name,
-        minTierLevel: video.minTierPlan?.level ?? 0,
-        limitedAccessUntilIso: video.limitedAccessUntil?.toISOString() ?? null,
-      }
-    })
-  )
+    const performersList =
+      video.performers.length > 0
+        ? video.performers.map((vp) => ({ name: vp.performer.name, slug: vp.performer.slug }))
+        : isOwnVideo
+          ? [{ name: performer.name, slug: performer.slug }]
+          : []
+
+    const videoIsVerified =
+      video.performers.length > 0
+        ? video.performers.some((vp) => vp.performer.verified)
+        : isOwnVideo
+          ? performer.verified
+          : false
+
+    return {
+      ...video,
+      previewUrl,
+      comingSoon: scheduled,
+      isNew: isVideoNew(video, nowMs),
+      category: video.categories[0]?.category.name,
+      performersList,
+      subtitle: performersList[0]?.name || (isOwnVideo ? performer.name : undefined),
+      isVerified: videoIsVerified,
+      minTierLevel: video.minTierPlan?.level ?? 0,
+      limitedAccessUntilIso: video.limitedAccessUntil?.toISOString() ?? null,
+    }
+  }
+
+  const ownVideoIdSet = new Set(ownRelatedVideos.map((v) => v.id))
+
+  const [latestReleaseWithPreview, videosWithPreviews] = await Promise.all([
+    latestRelease ? enrichVideo(latestRelease, true) : Promise.resolve(null),
+    Promise.all(combinedRelatedVideos.map((v) => enrichVideo(v, ownVideoIdSet.has(v.id)))),
+  ])
 
   // Format follower count
   const formatFollowers = (count: number) => {
@@ -474,83 +506,65 @@ export default async function ModelDetailPage({ params }: ModelDetailPageProps) 
       )}
 
       {/* Latest Release Section */}
-      {latestRelease && (
+      {latestReleaseWithPreview && (
         <div className="px-4 md:px-8 mt-8">
           <div className="w-full">
             <SectionHeader title="LATEST RELEASE" />
-            <Link href={`/videos/${latestRelease.slug}`}>
-              <div className="relative w-full aspect-[21/9] overflow-hidden mt-6 group cursor-pointer">
-                <Image
-                  src={latestRelease.thumbnailUrl || "/images/2.jpg"}
-                  alt={latestRelease.title}
-                  fill
-                  className="object-cover transition-transform duration-300 group-hover:scale-105"
-                  sizes="100vw"
-                  priority
-                />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-                  <div className="absolute bottom-6 left-6">
-                    <h3
-                      style={{
-                        color: "var(--text-primary)",
-                        fontFamily: "var(--global-font)",
-                        fontSize: "24px",
-                        fontWeight: 700,
-                        lineHeight: "32px",
-                      }}
-                    >
-                      {latestRelease.title}
-                    </h3>
-                    <p
-                      style={{
-                        color: "var(--text-secondary)",
-                        fontFamily: "var(--global-font)",
-                        fontSize: "14px",
-                        fontWeight: 400,
-                        marginTop: "8px",
-                      }}
-                    >
-                      {latestRelease.viewCount.toLocaleString("en-US")} views
-                    </p>
-                  </div>
-                </div>
-                {/* Play icon overlay */}
-                <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-                  <div className="w-20 h-20 bg-white/20 backdrop-blur-sm flex items-center justify-center">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="white">
-                      <path d="M8 5v14l11-7z"/>
-                    </svg>
-                  </div>
-                </div>
-              </div>
-            </Link>
+            <div className="mt-6">
+              <VideoCard
+                title={latestReleaseWithPreview.title}
+                subtitle={performer.name}
+                views={latestReleaseWithPreview.viewCount.toLocaleString("en-US")}
+                likes={latestReleaseWithPreview.likeCount.toLocaleString("en-US")}
+                imageUrl={latestReleaseWithPreview.thumbnailUrl || "/images/2.jpg"}
+                previewUrl={latestReleaseWithPreview.previewUrl}
+                previewStartTime={latestReleaseWithPreview.previewStartTime}
+                previewEndTime={latestReleaseWithPreview.previewEndTime}
+                isVerified={performer.verified}
+                slug={latestReleaseWithPreview.slug}
+                videoId={latestReleaseWithPreview.id}
+                variant="overlay"
+                aspectClassName="aspect-[16/9] md:aspect-[21/9]"
+                featured
+                category={latestReleaseWithPreview.category}
+                performers={latestReleaseWithPreview.performersList}
+                publishedAt={latestReleaseWithPreview.releaseDate || undefined}
+                comingSoon={latestReleaseWithPreview.comingSoon}
+                releaseDate={latestReleaseWithPreview.releaseDate?.toISOString() ?? null}
+                isNew={latestReleaseWithPreview.isNew}
+                minTierLevel={latestReleaseWithPreview.minTierLevel}
+                isDiamondExclusive={latestReleaseWithPreview.isDiamondExclusive}
+                isLimitedEdition={latestReleaseWithPreview.isLimitedEdition}
+                limitedAccessUntil={latestReleaseWithPreview.limitedAccessUntilIso}
+              />
+            </div>
           </div>
         </div>
       )}
 
-      {/* Videos Section */}
+      {/* Related Videos Section — always populated (performer's own videos first, then dynamic related recommendations) */}
       {videosWithPreviews.length > 0 && (
         <div className="px-4 md:px-8 mt-8">
           <div className="w-full">
-            <SectionHeader title="PERFORMER VIDEOS" />
+            <SectionHeader title="RELATED VIDEOS" />
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mt-6">
               {videosWithPreviews.map((video) => (
                 <VideoCard
                   key={video.id}
                   title={video.title}
-                  subtitle={performer.name}
+                  subtitle={video.subtitle}
                   views={video.viewCount.toLocaleString("en-US")}
                   likes={video.likeCount.toLocaleString("en-US")}
                   imageUrl={video.thumbnailUrl || "/images/2.jpg"}
                   previewUrl={video.previewUrl}
                   previewStartTime={video.previewStartTime}
                   previewEndTime={video.previewEndTime}
-                  isVerified={performer.verified}
+                  isVerified={video.isVerified}
                   slug={video.slug}
                   videoId={video.id}
-                  variant="below"
+                  variant="overlay"
                   category={video.category}
-                  performers={[{ name: performer.name, slug: performer.slug }]}
+                  performers={video.performersList}
                   publishedAt={video.releaseDate || undefined}
                   comingSoon={video.comingSoon}
                   releaseDate={video.releaseDate?.toISOString() ?? null}
@@ -561,6 +575,15 @@ export default async function ModelDetailPage({ params }: ModelDetailPageProps) 
                   limitedAccessUntil={video.limitedAccessUntilIso}
                 />
               ))}
+            </div>
+            <div className="mt-8 flex justify-center">
+              <Link
+                href="/videos"
+                className="btn-primary inline-flex items-center gap-2 transition-colors"
+              >
+                <span>View More</span>
+                <ArrowRight className="w-4 h-4" />
+              </Link>
             </div>
           </div>
         </div>

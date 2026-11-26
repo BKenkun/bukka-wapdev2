@@ -26,6 +26,8 @@ export type EmailTemplate =
   | "casting/reviewing"
   | "casting/accepted"
   | "casting/rejected"
+  | "casting/campaign-opened"
+  | "casting/campaign-closed"
   // Contact
   | "contact/notification"
   // Performer
@@ -97,6 +99,8 @@ export const DEFAULT_EMAIL_SETTINGS: EmailSettings = {
     "casting/reviewing": { subject: "Your application is under review", enabled: true },
     "casting/accepted": { subject: "Your application has been accepted", enabled: true },
     "casting/rejected": { subject: "Update on your application", enabled: true },
+    "casting/campaign-opened": { subject: "Casting Open: {campaignName} — Apply Now!", enabled: true },
+    "casting/campaign-closed": { subject: "Casting Closed: {campaignName} — Next Steps", enabled: true },
     "performer/available": { subject: "{performerName} is now available on BUKKAKERY!", enabled: true },
     "video/available": { subject: "NEW SCENE: {videoTitle} is now live on BUKKAKERY!", enabled: true },
   },

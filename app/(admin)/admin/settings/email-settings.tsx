@@ -52,12 +52,14 @@ const EMAIL_CATEGORIES = {
   },
   casting: {
     label: "Casting",
-    description: "Emails de solicitudes de casting",
+    description: "Emails de solicitudes y campañas de casting",
     templates: [
       { key: "casting/received", label: "Solicitud recibida" },
       { key: "casting/reviewing", label: "En revisión" },
       { key: "casting/accepted", label: "Solicitud aceptada" },
       { key: "casting/rejected", label: "Solicitud rechazada" },
+      { key: "casting/campaign-opened", label: "Campaña de casting abierta" },
+      { key: "casting/campaign-closed", label: "Campaña de casting cerrada" },
     ],
   },
 }

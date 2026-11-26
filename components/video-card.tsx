@@ -63,6 +63,8 @@ export interface VideoCardProps {
   isDiamondExclusive?: boolean
   isLimitedEdition?: boolean
   limitedAccessUntil?: string | null
+  aspectClassName?: string
+  featured?: boolean
 }
 
 export function VideoCard({
@@ -88,6 +90,8 @@ export function VideoCard({
   isDiamondExclusive = false,
   isLimitedEdition = false,
   limitedAccessUntil = null,
+  aspectClassName = "aspect-[476/309]",
+  featured = false,
 }: VideoCardProps) {
   const router = useRouter()
   const [isHovering, setIsHovering] = useState(false)
@@ -377,7 +381,11 @@ export function VideoCard({
   const PerformersLinks = () => {
     if (performers.length === 0) return null
     return (
-      <span className="text-white text-xs font-medium drop-shadow-lg uppercase flex flex-wrap gap-1">
+      <span
+        className={`text-white font-medium drop-shadow-lg uppercase flex flex-wrap gap-1 ${
+          featured ? "text-xs md:text-sm" : "text-xs"
+        }`}
+      >
         {performers.map((performer, index) => (
           <span key={performer.slug} className="flex items-center">
             <span
@@ -396,6 +404,8 @@ export function VideoCard({
     )
   }
 
+  const mediaObjectPosition = featured ? "object-center" : "object-left"
+
   // Preview media layer (video MP4 o animated.webp fallback), montado lazy en hover
   const renderPreviewMedia = () => {
     if (!hasActivatedPreview || !activePreviewUrl || previewFailed) return null
@@ -410,7 +420,7 @@ export function VideoCard({
             setPreviewFailed(true)
             setIsPreviewLoaded(false)
           }}
-          className={`absolute inset-0 w-full h-full object-cover object-left transition-opacity duration-300 ${
+          className={`absolute inset-0 w-full h-full object-cover ${mediaObjectPosition} transition-opacity duration-300 ${
             showActivePreview ? "opacity-100" : "opacity-0"
           }`}
         />
@@ -430,7 +440,7 @@ export function VideoCard({
         onPlaying={handlePreviewStarted}
         onError={handleVideoError}
         onTimeUpdate={previewEndTime ? handleTimeUpdate : undefined}
-        className={`absolute inset-0 w-full h-full object-cover object-left transition-opacity duration-300 ${
+        className={`absolute inset-0 w-full h-full object-cover ${mediaObjectPosition} transition-opacity duration-300 ${
           showActivePreview ? "opacity-100" : "opacity-0"
         }`}
       />
@@ -525,7 +535,7 @@ export function VideoCard({
       onMouseLeave={handleMouseLeave}
     >
       {/* Video thumbnail / preview */}
-      <div className="relative w-full aspect-[476/309] bg-black">
+      <div className={`relative w-full ${aspectClassName} bg-black`}>
         {showNewBadge && (
           <span
             className="absolute top-3 right-3 z-20 px-2.5 py-1 text-[10px] font-bold tracking-widest uppercase"
@@ -539,20 +549,20 @@ export function VideoCard({
 
         {/* Play icon - center */}
         <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
-          <div className={`bg-black/50 p-3 transition-transform duration-300 ${isHovering ? "scale-110" : ""}`}>
-            <PlayIcon className="w-8 h-8 text-white" />
+          <div className={`bg-black/50 ${featured ? "p-4" : "p-3"} transition-transform duration-300 ${isHovering ? "scale-110" : ""}`}>
+            <PlayIcon className={featured ? "w-10 h-10 text-white" : "w-8 h-8 text-white"} />
           </div>
         </div>
 
         {/* Category and performers overlay - top left, only on hover */}
         {(category || performers.length > 0) && (
           <div
-            className={`absolute top-2 left-2 z-10 flex flex-col gap-1 max-w-[80%] transition-opacity duration-300 ${
+            className={`absolute ${featured ? "top-3 left-3 md:top-5 md:left-6" : "top-2 left-2"} z-10 flex flex-col gap-1 max-w-[80%] transition-opacity duration-300 ${
               isHovering ? "opacity-100" : "opacity-0"
             }`}
           >
             {category && (
-              <span className="text-white text-sm font-bold drop-shadow-lg uppercase">
+              <span className={`text-white font-bold drop-shadow-lg uppercase ${featured ? "text-sm md:text-base" : "text-sm"}`}>
                 {category}
               </span>
             )}
@@ -564,7 +574,7 @@ export function VideoCard({
         <img
           src={imageUrl || "/placeholder.svg"}
           alt={title}
-          className={`absolute inset-0 w-full h-full object-cover object-left transition-opacity duration-300 ${
+          className={`absolute inset-0 w-full h-full object-cover ${mediaObjectPosition} transition-opacity duration-300 ${
             showActivePreview ? "opacity-0" : "opacity-100"
           }`}
         />
@@ -576,9 +586,14 @@ export function VideoCard({
         <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent" />
 
         {/* Content overlay */}
-        <div className="absolute inset-0 p-4 flex flex-col justify-end">
+        <div className={`absolute inset-0 ${featured ? "p-4 md:p-6" : "p-4"} flex flex-col justify-end`}>
           {/* Title */}
-          <h3 className="font-bold text-lg leading-tight mb-2" style={{ color: "var(--vc-title-color)" }}>{title}</h3>
+          <h3
+            className={`font-bold leading-tight mb-2 ${featured ? "text-lg md:text-2xl" : "text-lg"}`}
+            style={{ color: "var(--vc-title-color)" }}
+          >
+            {title}
+          </h3>
 
           {/* Views and Date */}
           <div className="flex items-center gap-3 text-white text-sm">

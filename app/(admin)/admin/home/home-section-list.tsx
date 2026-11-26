@@ -18,6 +18,11 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { HomeSectionType } from "@prisma/client"
 import { HomeSectionEditor } from "./home-section-editor"
+import {
+  getEffectiveBgSource,
+  getNormalizedManualVideoIds,
+  type UnifiedBannerConfig,
+} from "@/lib/banner-config"
 
 interface HomeSection {
   id: string
@@ -55,13 +60,36 @@ interface Tag {
   slug: string
 }
 
+interface Category {
+  id: string
+  name: string
+  slug: string
+}
+
 interface HomeSectionListProps {
   sections: HomeSection[]
   pages: Page[]
   tags: Tag[]
+  categories: Category[]
 }
 
-export function HomeSectionList({ sections, pages, tags }: HomeSectionListProps) {
+const VIDEO_SOURCE_LABELS: Record<string, string> = {
+  manual: "Manual",
+  latest: "Últimos vídeos",
+  popular: "Más populares",
+  popular_weekly: "Más vistos (semana)",
+  trending: "Tendencias",
+  category: "Por categoría",
+  tag: "Por tag",
+}
+
+const ROTATION_LABELS: Record<string, string> = {
+  fixed: "Fijo",
+  sequential: "Rotación en orden",
+  random: "Rotación aleatoria",
+}
+
+export function HomeSectionList({ sections, pages, tags, categories }: HomeSectionListProps) {
   const typeConfig = sectionTypeConfig
   const router = useRouter()
   const [editingSection, setEditingSection] = useState<HomeSection | null>(null)
@@ -193,11 +221,33 @@ export function HomeSectionList({ sections, pages, tags }: HomeSectionListProps)
                     Límite: {(section.config as { limit?: number }).limit || "N/A"}
                   </p>
                 )}
-                {section.type === "CTA_BANNER" && section.config && (
-                  <p className="text-sm text-muted-foreground mt-1 truncate">
-                    {(section.config as { title?: string }).title || "Sin título"}
-                  </p>
-                )}
+                {(section.type === "HERO" || section.type === "CTA_BANNER") && section.config && (() => {
+                  const cfg = section.config as UnifiedBannerConfig
+                  const bgSource = getEffectiveBgSource(cfg, section.type)
+                  const parts: string[] = []
+                  if (bgSource === "dbVideo") {
+                    const src = cfg.dbVideoSource || "manual"
+                    if (src === "manual") {
+                      const count = getNormalizedManualVideoIds(cfg).length
+                      parts.push(`Vídeo web · Manual (${count} ${count === 1 ? "vídeo" : "vídeos"})`)
+                    } else {
+                      parts.push(`Vídeo web · ${VIDEO_SOURCE_LABELS[src] || src}`)
+                    }
+                    parts.push(ROTATION_LABELS[cfg.rotationMode || "fixed"] || "Fijo")
+                  } else if (bgSource === "uploadedVideo") {
+                    parts.push("Vídeo subido")
+                  } else {
+                    parts.push("Imagen de fondo")
+                  }
+                  if (cfg.title) {
+                    parts.push(cfg.title)
+                  }
+                  return (
+                    <p className="text-sm text-muted-foreground mt-1 truncate">
+                      {parts.join(" · ")}
+                    </p>
+                  )
+                })()}
                 {section.type === "COUNTDOWN" && section.config && (() => {
                   const cfg = section.config as {
                     mode?: string
@@ -252,6 +302,7 @@ export function HomeSectionList({ sections, pages, tags }: HomeSectionListProps)
           section={editingSection}
           pages={pages}
           tags={tags}
+          categories={categories}
           onSave={handleSave}
           onClose={() => setEditingSection(null)}
         />

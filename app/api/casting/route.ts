@@ -4,6 +4,7 @@ import { auth } from "@/auth"
 import { castingApiSchema } from "@/lib/validations/casting"
 import { sendTemplateEmail, CastingReceivedTemplate } from "@/lib/email"
 import { createAdminNotification } from "@/lib/admin-notifications"
+import { getCastingSettings, getEffectiveCastingState } from "@/lib/casting-settings"
 
 // GET - Obtener todas las solicitudes de casting (admin only)
 export async function GET(request: NextRequest) {
@@ -60,6 +61,15 @@ export async function GET(request: NextRequest) {
 // POST - Crear nueva solicitud de casting (público)
 export async function POST(request: NextRequest) {
   try {
+    const castingSettings = await getCastingSettings()
+    const castingState = getEffectiveCastingState(castingSettings)
+    if (!castingState.isEffectivelyOpen) {
+      return NextResponse.json(
+        { error: "Casting applications are currently closed." },
+        { status: 400 }
+      )
+    }
+
     const body = await request.json()
 
     // Validación con Zod

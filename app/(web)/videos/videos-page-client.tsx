@@ -240,7 +240,7 @@ export function VideosPageClient({
               <div
                 className={`grid grid-cols-1 md:grid-cols-2 ${
                   isFilterOpen ? "lg:grid-cols-2" : "lg:grid-cols-3"
-                } gap-x-4 gap-y-8`}
+                } gap-4`}
               >
                 {videos.map((video) => (
                   <VideoCard
@@ -256,7 +256,7 @@ export function VideosPageClient({
                     previewEndTime={video.previewEndTime}
                     isVerified={video.isVerified}
                     slug={video.slug}
-                    variant="below"
+                    variant="overlay"
                     category={video.category}
                     performers={video.performers}
                     publishedAt={video.publishedAt}

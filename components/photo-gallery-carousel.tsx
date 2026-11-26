@@ -2,6 +2,7 @@
 
 import { useRef, useState, useEffect, useCallback } from "react"
 import Image from "next/image"
+import { ChevronLeft, ChevronRight, X, ZoomIn } from "lucide-react"
 
 interface Photo {
   id?: string
@@ -15,69 +16,126 @@ interface PhotoGalleryCarouselProps {
 }
 
 export function PhotoGalleryCarousel({ photos, performerName }: PhotoGalleryCarouselProps) {
+  const sectionRef = useRef<HTMLElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+
+  // Only photos inside [start, end] mount <Image>; null when gallery is off-screen vertically
+  const [visibleRange, setVisibleRange] = useState<[number, number] | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const hasDragged = useRef(false)
   const dragStartX = useRef(0)
   const dragScrollLeft = useRef(0)
-  const isResetting = useRef(false)
+
+  const [canScrollLeft, setCanScrollLeft] = useState(false)
+  const [canScrollRight, setCanScrollRight] = useState(photos.length > 1)
+  const [scrollProgress, setScrollProgress] = useState(0)
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
 
-  // 3x items for infinite loop
-  const items = photos.length > 0 ? photos : []
-  const tripled = [...items, ...items, ...items]
+  const photoCount = photos.length
 
-  const getSetWidth = useCallback(() => {
+  const computeVisibility = useCallback(() => {
+    const sectionEl = sectionRef.current
     const el = scrollRef.current
-    if (!el || items.length === 0) return 0
-    return el.scrollWidth / 3
-  }, [items.length])
+    if (!sectionEl || !el || photoCount === 0) return
 
-  // Initialize scroll to the middle set
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el || items.length === 0) return
-    requestAnimationFrame(() => {
-      const setWidth = el.scrollWidth / 3
-      el.scrollLeft = setWidth
-    })
-  }, [items.length])
+    // Update scroll arrows and progress bar
+    const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth)
+    setCanScrollLeft(el.scrollLeft > 4)
+    setCanScrollRight(maxScroll > 4 && el.scrollLeft < maxScroll - 4)
+    setScrollProgress(maxScroll > 0 ? Math.min(1, Math.max(0, el.scrollLeft / maxScroll)) : 0)
 
-  // Loop on scroll
-  const handleScroll = useCallback(() => {
-    if (isResetting.current) return
-    const el = scrollRef.current
-    if (!el || items.length === 0) return
-    const setWidth = getSetWidth()
-    if (setWidth === 0) return
+    // 1) Check if gallery section is visible vertically in the viewport
+    const secRect = sectionEl.getBoundingClientRect()
+    const verticalBuffer = 120
+    const isVerticallyVisible =
+      secRect.height > 0 &&
+      secRect.bottom >= -verticalBuffer &&
+      secRect.top <= window.innerHeight + verticalBuffer
 
-    if (el.scrollLeft >= setWidth * 2) {
-      isResetting.current = true
-      el.style.scrollBehavior = "auto"
-      el.scrollLeft = el.scrollLeft - setWidth
-      el.style.scrollBehavior = ""
-      isResetting.current = false
-    } else if (el.scrollLeft <= 0) {
-      isResetting.current = true
-      el.style.scrollBehavior = "auto"
-      el.scrollLeft = el.scrollLeft + setWidth
-      el.style.scrollBehavior = ""
-      isResetting.current = false
+    if (!isVerticallyVisible) {
+      setVisibleRange((prev) => (prev === null ? prev : null))
+      return
     }
-  }, [getSetWidth, items.length])
+
+    // 2) Compute the exact contiguous slice [start, end] of horizontally visible slides
+    const horizontalBuffer = 120
+    const viewLeft = el.scrollLeft - horizontalBuffer
+    const viewRight = el.scrollLeft + el.clientWidth + horizontalBuffer
+
+    let start = -1
+    let end = -1
+    const children = el.children
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i] as HTMLElement
+      const left = child.offsetLeft
+      const right = left + child.offsetWidth
+      if (right >= viewLeft && left <= viewRight) {
+        if (start === -1) start = i
+        end = i
+      } else if (left > viewRight) {
+        break
+      }
+    }
+
+    if (start === -1 || end === -1) {
+      setVisibleRange((prev) => (prev === null ? prev : null))
+      return
+    }
+
+    setVisibleRange((prev) => {
+      if (prev && prev[0] === start && prev[1] === end) return prev
+      return [start, end]
+    })
+  }, [photoCount])
 
   useEffect(() => {
+    const sectionEl = sectionRef.current
     const el = scrollRef.current
-    if (!el) return
-    el.addEventListener("scroll", handleScroll, { passive: true })
-    return () => el.removeEventListener("scroll", handleScroll)
-  }, [handleScroll])
+    if (!sectionEl || !el || photoCount === 0) return
+
+    let rafId: number | null = null
+    const scheduleCompute = () => {
+      if (rafId !== null) return
+      rafId = requestAnimationFrame(() => {
+        rafId = null
+        computeVisibility()
+      })
+    }
+
+    scheduleCompute()
+    el.addEventListener("scroll", scheduleCompute, { passive: true })
+    window.addEventListener("scroll", scheduleCompute, { passive: true })
+    window.addEventListener("resize", scheduleCompute, { passive: true })
+
+    // Also observe section visibility changes & container resizes (e.g. layout shifts)
+    const io =
+      typeof IntersectionObserver !== "undefined"
+        ? new IntersectionObserver(() => scheduleCompute(), { rootMargin: "120px 0px" })
+        : null
+    io?.observe(sectionEl)
+
+    const ro =
+      typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => scheduleCompute()) : null
+    ro?.observe(el)
+
+    return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId)
+      el.removeEventListener("scroll", scheduleCompute)
+      window.removeEventListener("scroll", scheduleCompute)
+      window.removeEventListener("resize", scheduleCompute)
+      io?.disconnect()
+      ro?.disconnect()
+    }
+  }, [photoCount, computeVisibility])
 
   const scroll = (direction: "left" | "right") => {
     const el = scrollRef.current
     if (!el) return
-    const scrollAmount = el.clientWidth * 0.75
-    el.scrollBy({ left: direction === "left" ? -scrollAmount : scrollAmount, behavior: "smooth" })
+    const scrollAmount = el.clientWidth * 0.8
+    el.scrollBy({
+      left: direction === "left" ? -scrollAmount : scrollAmount,
+      behavior: "smooth",
+    })
   }
 
   const handleDragStart = (clientX: number) => {
@@ -105,9 +163,21 @@ export function PhotoGalleryCarousel({ photos, performerName }: PhotoGalleryCaro
     setLightboxIndex(realIndex)
   }
 
-  // Lightbox navigation
-  const lightboxPrev = () => setLightboxIndex((prev) => prev !== null ? (prev - 1 + items.length) % items.length : null)
-  const lightboxNext = () => setLightboxIndex((prev) => prev !== null ? (prev + 1) % items.length : null)
+  // Lightbox navigation across the entire photo collection
+  const lightboxPrev = useCallback(
+    () =>
+      setLightboxIndex((prev) =>
+        prev !== null && photoCount > 0 ? (prev - 1 + photoCount) % photoCount : null
+      ),
+    [photoCount]
+  )
+  const lightboxNext = useCallback(
+    () =>
+      setLightboxIndex((prev) =>
+        prev !== null && photoCount > 0 ? (prev + 1) % photoCount : null
+      ),
+    [photoCount]
+  )
 
   useEffect(() => {
     if (lightboxIndex === null) return
@@ -118,8 +188,11 @@ export function PhotoGalleryCarousel({ photos, performerName }: PhotoGalleryCaro
     }
     document.body.style.overflow = "hidden"
     window.addEventListener("keydown", handleKey)
-    return () => { window.removeEventListener("keydown", handleKey); document.body.style.overflow = "" }
-  }, [lightboxIndex])
+    return () => {
+      window.removeEventListener("keydown", handleKey)
+      document.body.style.overflow = ""
+    }
+  }, [lightboxIndex, lightboxPrev, lightboxNext])
 
   const arrowStyle: React.CSSProperties = {
     width: "var(--carousel-arrow-size, 44px)",
@@ -132,50 +205,63 @@ export function PhotoGalleryCarousel({ photos, performerName }: PhotoGalleryCaro
     color: "var(--carousel-arrow-icon, #FFFFFF)",
   }
 
-  if (items.length === 0) return null
+  if (photoCount === 0) return null
 
   return (
     <>
-      <section className="w-full relative group/carousel">
+      <section ref={sectionRef} className="w-full relative group/carousel">
         {/* Left arrow */}
-        <button
-          onClick={() => scroll("left")}
-          className="absolute left-2 sm:left-3 top-1/2 -translate-y-1/2 z-10 flex items-center justify-center backdrop-blur-sm transition-all cursor-pointer hover:scale-110"
-          style={arrowStyle}
-          onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "var(--carousel-arrow-hover-bg, #000000)" }}
-          onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "var(--carousel-arrow-bg, #1A1A1A)" }}
-          aria-label="Previous"
-        >
-          <svg className="w-5 h-5 sm:w-6 sm:h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15 19l-7-7 7-7" />
-          </svg>
-        </button>
+        {canScrollLeft && (
+          <button
+            type="button"
+            onClick={() => scroll("left")}
+            className="absolute left-2 sm:left-3 top-1/2 -translate-y-1/2 z-10 flex items-center justify-center backdrop-blur-sm transition-all cursor-pointer hover:scale-110"
+            style={arrowStyle}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = "var(--carousel-arrow-hover-bg, #000000)"
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = "var(--carousel-arrow-bg, #1A1A1A)"
+            }}
+            aria-label="Previous photos"
+          >
+            <ChevronLeft className="w-5 h-5 sm:w-6 sm:h-6" />
+          </button>
+        )}
 
         {/* Right arrow */}
-        <button
-          onClick={() => scroll("right")}
-          className="absolute right-2 sm:right-3 top-1/2 -translate-y-1/2 z-10 flex items-center justify-center backdrop-blur-sm transition-all cursor-pointer hover:scale-110"
-          style={arrowStyle}
-          onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "var(--carousel-arrow-hover-bg, #000000)" }}
-          onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "var(--carousel-arrow-bg, #1A1A1A)" }}
-          aria-label="Next"
-        >
-          <svg className="w-5 h-5 sm:w-6 sm:h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" />
-          </svg>
-        </button>
+        {canScrollRight && (
+          <button
+            type="button"
+            onClick={() => scroll("right")}
+            className="absolute right-2 sm:right-3 top-1/2 -translate-y-1/2 z-10 flex items-center justify-center backdrop-blur-sm transition-all cursor-pointer hover:scale-110"
+            style={arrowStyle}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = "var(--carousel-arrow-hover-bg, #000000)"
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = "var(--carousel-arrow-bg, #1A1A1A)"
+            }}
+            aria-label="Next photos"
+          >
+            <ChevronRight className="w-5 h-5 sm:w-6 sm:h-6" />
+          </button>
+        )}
 
-        {/* Scrollable container - 3x for infinite loop */}
+        {/* Scrollable container across all photos; off-screen photos stay unmounted until visible */}
         <div
           ref={scrollRef}
-          className="flex gap-3 sm:gap-4 overflow-x-auto select-none"
+          className="relative flex gap-3 sm:gap-4 overflow-x-auto select-none"
           style={{
             scrollbarWidth: "none",
             msOverflowStyle: "none",
             cursor: isDragging ? "grabbing" : "grab",
             WebkitOverflowScrolling: "touch",
           }}
-          onMouseDown={(e) => { e.preventDefault(); handleDragStart(e.clientX) }}
+          onMouseDown={(e) => {
+            e.preventDefault()
+            handleDragStart(e.clientX)
+          }}
           onMouseMove={(e) => handleDragMove(e.clientX)}
           onMouseUp={handleDragEnd}
           onMouseLeave={handleDragEnd}
@@ -183,76 +269,139 @@ export function PhotoGalleryCarousel({ photos, performerName }: PhotoGalleryCaro
           onTouchMove={(e) => handleDragMove(e.touches[0].clientX)}
           onTouchEnd={handleDragEnd}
         >
-          {tripled.map((photo, index) => {
-            const realIndex = index % items.length
+          {photos.map((photo, index) => {
+            const shouldMountImage =
+              visibleRange !== null && index >= visibleRange[0] && index <= visibleRange[1]
+
             return (
               <div
-                key={`${photo.id || realIndex}-${Math.floor(index / items.length)}`}
+                key={photo.id || index}
+                data-photo-index={index}
                 className="flex-shrink-0 w-[60vw] sm:w-[42vw] md:w-[32vw] lg:w-[25vw] xl:w-[20vw] 2xl:w-[17vw]"
-                onClick={() => handleClick(realIndex)}
+                onClick={() => handleClick(index)}
               >
-                <div className="relative w-full aspect-[9/16] overflow-hidden group cursor-pointer">
-                  <Image
-                    src={photo.imageUrl}
-                    alt={photo.caption || `${performerName} photo ${realIndex + 1}`}
-                    fill
-                    className="object-cover transition-transform duration-300 group-hover:scale-105"
-                    sizes="(max-width: 768px) 60vw, (max-width: 1200px) 32vw, 20vw"
-                  />
+                <div
+                  className="relative w-full aspect-[9/16] overflow-hidden group cursor-pointer"
+                  style={{ backgroundColor: "var(--surface-bg, #1a1a1a)" }}
+                >
+                  {shouldMountImage && (
+                    <Image
+                      src={photo.imageUrl}
+                      alt={photo.caption || `${performerName} photo ${index + 1}`}
+                      fill
+                      loading="eager"
+                      decoding="async"
+                      referrerPolicy="no-referrer"
+                      className="object-cover transition-transform duration-300 group-hover:scale-105"
+                      sizes="(max-width: 768px) 60vw, (max-width: 1200px) 32vw, 20vw"
+                    />
+                  )}
+
                   {/* Hover overlay */}
-                  <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /><line x1="11" y1="8" x2="11" y2="14" /><line x1="8" y1="11" x2="14" y2="11" />
-                    </svg>
+                  <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
+                    <ZoomIn className="w-8 h-8 text-white" />
                   </div>
                 </div>
               </div>
             )
           })}
         </div>
+
+        {/* Hairline scroll progress bar & photo count when gallery overflows */}
+        {(canScrollLeft || canScrollRight) && (
+          <div className="mt-3 flex items-center gap-3">
+            <div
+              className="flex-1 h-[2px] overflow-hidden"
+              style={{ backgroundColor: "var(--border-color, #262626)" }}
+            >
+              <div
+                className="h-full transition-all duration-150"
+                style={{
+                  width: `${Math.max(8, scrollProgress * 100)}%`,
+                  backgroundColor: "var(--brand-color, #FA4860)",
+                }}
+              />
+            </div>
+            <span
+              className="text-xs font-medium tabular-nums flex-shrink-0"
+              style={{ color: "var(--text-muted, #999999)" }}
+            >
+              {photoCount} photos
+            </span>
+          </div>
+        )}
       </section>
 
       {/* Lightbox */}
-      {lightboxIndex !== null && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center" onClick={() => setLightboxIndex(null)}>
+      {lightboxIndex !== null && photos[lightboxIndex] && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center"
+          onClick={() => setLightboxIndex(null)}
+        >
           <div className="absolute inset-0 bg-black/90" />
 
           {/* Close */}
-          <button onClick={() => setLightboxIndex(null)} className="absolute top-4 right-4 z-10 p-2 cursor-pointer hover:opacity-70" style={{ color: "#fff" }}>
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
+          <button
+            type="button"
+            onClick={() => setLightboxIndex(null)}
+            className="absolute top-4 right-4 z-10 p-2 cursor-pointer hover:opacity-70 text-white"
+            aria-label="Close lightbox"
+          >
+            <X className="w-8 h-8" />
           </button>
 
           {/* Prev */}
-          <button onClick={(e) => { e.stopPropagation(); lightboxPrev() }} className="absolute left-4 top-1/2 -translate-y-1/2 z-10 p-3 cursor-pointer hover:scale-110 transition-transform" style={{ ...arrowStyle }}>
-            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15 19l-7-7 7-7" />
-            </svg>
-          </button>
+          {photoCount > 1 && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                lightboxPrev()
+              }}
+              className="absolute left-4 top-1/2 -translate-y-1/2 z-10 flex items-center justify-center cursor-pointer hover:scale-110 transition-transform"
+              style={arrowStyle}
+              aria-label="Previous photo"
+            >
+              <ChevronLeft className="w-6 h-6" />
+            </button>
+          )}
 
           {/* Next */}
-          <button onClick={(e) => { e.stopPropagation(); lightboxNext() }} className="absolute right-4 top-1/2 -translate-y-1/2 z-10 p-3 cursor-pointer hover:scale-110 transition-transform" style={{ ...arrowStyle }}>
-            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" />
-            </svg>
-          </button>
+          {photoCount > 1 && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                lightboxNext()
+              }}
+              className="absolute right-4 top-1/2 -translate-y-1/2 z-10 flex items-center justify-center cursor-pointer hover:scale-110 transition-transform"
+              style={arrowStyle}
+              aria-label="Next photo"
+            >
+              <ChevronRight className="w-6 h-6" />
+            </button>
+          )}
 
           {/* Image */}
-          <div className="relative max-w-[90vw] max-h-[90vh] w-auto h-auto" onClick={(e) => e.stopPropagation()}>
+          <div
+            className="relative max-w-[90vw] max-h-[90vh] w-auto h-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
             <Image
-              src={items[lightboxIndex].imageUrl}
-              alt={items[lightboxIndex].caption || `${performerName} photo ${lightboxIndex + 1}`}
+              key={photos[lightboxIndex].id || lightboxIndex}
+              src={photos[lightboxIndex].imageUrl}
+              alt={photos[lightboxIndex].caption || `${performerName} photo ${lightboxIndex + 1}`}
               width={800}
               height={1200}
               className="object-contain max-h-[90vh] w-auto"
+              referrerPolicy="no-referrer"
               priority
             />
           </div>
 
           {/* Counter */}
-          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-white/70 text-sm font-montserrat">
-            {lightboxIndex + 1} / {items.length}
+          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-white/80 text-sm tabular-nums">
+            {lightboxIndex + 1} / {photoCount}
           </div>
         </div>
       )}

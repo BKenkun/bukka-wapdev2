@@ -4,7 +4,7 @@ import { IconHome } from "@tabler/icons-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 
 export default async function AdminHomePage() {
-  const [sections, pages, tags] = await Promise.all([
+  const [sections, pages, tags, categories] = await Promise.all([
     prisma.homeSection.findMany({
       orderBy: { order: "asc" },
     }),
@@ -16,6 +16,10 @@ export default async function AdminHomePage() {
     prisma.tag.findMany({
       select: { id: true, name: true, slug: true },
       orderBy: { name: "asc" },
+    }),
+    prisma.videoCategory.findMany({
+      select: { id: true, name: true, slug: true },
+      orderBy: { order: "asc" },
     }),
   ])
 
@@ -86,6 +90,7 @@ export default async function AdminHomePage() {
             }))}
             pages={pages}
             tags={tags}
+            categories={categories}
           />
         </CardContent>
       </Card>
