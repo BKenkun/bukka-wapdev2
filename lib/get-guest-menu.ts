@@ -39,7 +39,7 @@ export async function getGuestMenu(): Promise<GuestMenuData | null> {
     const transformedItems: GuestMenuItem[] = await Promise.all(
       menu.items.map(async (item) => {
         // Determine URL
-        let url = item.url || "#"
+        let url = (item.url || "#").trim()
         if (item.pageId) {
           const page = await prisma.page.findUnique({
             where: { id: item.pageId, status: "PUBLISHED" },

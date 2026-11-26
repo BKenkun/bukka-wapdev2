@@ -1,9 +1,55 @@
-import { cookies } from "next/headers"
+import { cookies, headers } from "next/headers"
 import { randomBytes } from "crypto"
 import { prisma } from "@/lib/prisma"
 
 export const CART_COOKIE = "cart_session_id"
 export const CART_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30 // 30 days
+
+async function shouldUseCrossSiteCartCookie(): Promise<boolean> {
+  if (
+    Boolean(process.env.K_SERVICE) ||
+    process.env.AUTH_COOKIE_SAMESITE === "none"
+  ) {
+    return true
+  }
+
+  try {
+    const hdrs = await headers()
+    const proto = hdrs.get("x-forwarded-proto") || ""
+    const fetchSite = hdrs.get("sec-fetch-site") || ""
+    const fetchDest = hdrs.get("sec-fetch-dest") || ""
+    const isHttps = proto.includes("https") || process.env.NODE_ENV === "production"
+    if (isHttps && (fetchSite === "cross-site" || fetchDest === "iframe")) {
+      return true
+    }
+  } catch {
+    // Ignore when called outside a request headers context
+  }
+
+  return false
+}
+
+async function getCartCookieOptions(maxAge: number) {
+  const crossSite = await shouldUseCrossSiteCartCookie()
+  if (crossSite) {
+    return {
+      httpOnly: true,
+      secure: true,
+      sameSite: "none" as const,
+      partitioned: true,
+      path: "/",
+      maxAge,
+    }
+  }
+
+  return {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax" as const,
+    path: "/",
+    maxAge,
+  }
+}
 
 export async function getCartSessionId(): Promise<string | null> {
   const jar = await cookies()
@@ -16,19 +62,15 @@ export async function ensureCartSessionId(): Promise<string> {
   if (current) return current
 
   const id = randomBytes(16).toString("hex")
-  jar.set(CART_COOKIE, id, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    path: "/",
-    maxAge: CART_COOKIE_MAX_AGE_SECONDS,
-  })
+  const options = await getCartCookieOptions(CART_COOKIE_MAX_AGE_SECONDS)
+  jar.set(CART_COOKIE, id, options)
   return id
 }
 
 export async function clearCartSessionCookie() {
   const jar = await cookies()
-  jar.delete(CART_COOKIE)
+  const options = await getCartCookieOptions(0)
+  jar.set(CART_COOKIE, "", options)
 }
 
 /**

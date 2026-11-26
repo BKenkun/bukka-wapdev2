@@ -40,7 +40,10 @@ export function CartButton() {
 
   const fetchCart = async () => {
     try {
-      const res = await fetch("/api/cart")
+      const res = await fetch("/api/cart", {
+        cache: "no-store",
+        credentials: "include",
+      })
       if (res.ok) {
         const data = await res.json()
         setCart(data.cart)

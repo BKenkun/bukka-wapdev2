@@ -2,7 +2,10 @@
 
 import { Suspense, useState, useEffect } from "react"
 import { useSearchParams } from "next/navigation"
+import { useSession } from "next-auth/react"
 import Link from "next/link"
+import { toast } from "sonner"
+import { safeParseJson } from "@/lib/safe-json"
 
 interface OrderData {
   id: string
@@ -32,6 +35,7 @@ export default function CheckoutResultPage() {
 
 function CheckoutResultContent() {
   const searchParams = useSearchParams()
+  const { status: sessionStatus } = useSession()
   const orderNumber = searchParams.get("order")
   const status = searchParams.get("status")
 
@@ -40,55 +44,70 @@ function CheckoutResultContent() {
   const [retrying, setRetrying] = useState(false)
 
   useEffect(() => {
+    if (sessionStatus === "loading") return
+
+    let active = true
+    let pollTimer: ReturnType<typeof setTimeout> | null = null
+    let attempts = 0
+
     const fetchOrder = async () => {
-      if (!orderNumber) {
-        setLoading(false)
+      if (!orderNumber || sessionStatus !== "authenticated") {
+        if (active) setLoading(false)
         return
       }
 
       try {
-        const res = await fetch(`/api/orders?orderNumber=${orderNumber}`)
-        if (res.ok) {
-          const data = await res.json()
-          const found = data.orders?.[0]
+        const res = await fetch(`/api/orders?orderNumber=${encodeURIComponent(orderNumber)}`, {
+          credentials: "include",
+        })
+        if (res.ok && active) {
+          const data = await safeParseJson<{ orders?: OrderData[] }>(res)
+          const found: OrderData | undefined = data?.orders?.[0]
           if (found) {
             setOrder(found)
+            if (status === "success" && found.paymentStatus !== "PAID" && attempts < 6) {
+              attempts += 1
+              pollTimer = setTimeout(fetchOrder, 2500)
+            }
           }
         }
       } catch (error) {
-        console.error("Error fetching order:", error)
+        console.warn("Error fetching order:", error)
       } finally {
-        setLoading(false)
+        if (active) setLoading(false)
       }
     }
 
     fetchOrder()
-  }, [orderNumber])
+    return () => {
+      active = false
+      if (pollTimer) clearTimeout(pollTimer)
+    }
+  }, [orderNumber, status, sessionStatus])
 
   const handleRetryPayment = async () => {
     if (!order) return
     setRetrying(true)
 
     try {
-      const res = await fetch("/api/payments/easierpay/initiate", {
+      const res = await fetch("/api/payments/initiate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ orderId: order.id }),
       })
 
-      if (res.ok) {
-        const data = await res.json()
-        if (data.payLink) {
-          window.location.href = data.payLink
-          return
-        }
+      const data = await safeParseJson<{ payLink?: string; error?: string }>(res)
+
+      if (res.ok && data?.payLink) {
+        window.location.href = data.payLink
+        return
       }
 
-      const error = await res.json().catch(() => null)
-      alert(error?.error || "Error retrying payment")
+      toast.error(data?.error || "Error retrying payment")
     } catch (error) {
-      console.error("Error retrying payment:", error)
-      alert("Error retrying payment")
+      console.warn("Error retrying payment:", error)
+      toast.error("Error retrying payment")
     } finally {
       setRetrying(false)
     }

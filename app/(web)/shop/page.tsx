@@ -150,7 +150,7 @@ export default async function TiendaPage({
                 style={{ color: "var(--text-muted, #6b7280)", fontFamily: "var(--global-font)" }}
               >
                 Showing {skip + 1}-{Math.min(skip + pageSize, totalCount)} of{" "}
-                {totalCount.toLocaleString()} products
+                {totalCount.toLocaleString("en-US")} products
               </p>
             </div>
 

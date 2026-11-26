@@ -1,0 +1,2895 @@
+import express from 'express';
+import dotenv from 'dotenv';
+import crypto from 'crypto';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { FieldValue } from 'firebase-admin/firestore';
+import {
+  projectId,
+  databaseId,
+  areAdminCredentialsAvailable,
+  checkAdminFirestoreHealth,
+  isAdminCredentialError,
+  runWithAdminFirestore,
+  getAdminAuth,
+  verifyFirebaseIdToken,
+  extractBearerToken,
+  getCallerRoleServer,
+  verifyOrderEmailAccessServer,
+  toFirestoreRestValue
+} from './src/server/firebaseAdmin';
+import {
+  sendMailjetEmail,
+  sendOrderReceivedEmail,
+  sendAdminNewOrderEmail,
+  sendSubscriptionStatusEmail,
+  sendCreatorInvitationEmail,
+  sendAuthTransactionalEmail
+} from './src/lib/mailjet';
+import { renderOrderConfirmationEmailHtml } from './src/services/emailTemplates';
+import type { Order as MailjetOrder } from './src/lib/types';
+import {
+  getLiveExchangeRates,
+  detectVisitorLocalization,
+  translateBatchWithGemini,
+  resolvePreferenceWithGemini,
+  SupportedLanguageCode,
+  SupportedCurrencyCode
+} from './src/server/localization';
+import {
+  CheckoutPricingError,
+  calculateServerOrderTotals,
+  getServerShippingQuotes,
+  getAuthoritativeSubscriptionConfig
+} from './src/server/checkoutPricing';
+import {
+  syncOrderPacklinkShipment,
+  buildAdminShippingEmailAttachments,
+  generateOrderShippingPdfBuffer,
+  fetchPacklinkLabelDirectOrUrl,
+  readOrderServer
+} from './src/server/shippingPdf';
+import { readPacklinkSettings } from './src/lib/packlink-config';
+import { getAdminNotificationEmails } from './src/lib/admin';
+import { DEFAULT_SITE_CONFIG } from './src/data/defaultSiteConfig';
+import type { EmailConfig } from './src/types';
+
+dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const app = express();
+app.set('trust proxy', 1);
+const PORT = Number(process.env.PORT) || 3000;
+
+// Enable JSON body parsing while retaining rawBody for HMAC webhook verification
+app.use(
+  express.json({
+    verify: (req: any, _res, buf) => {
+      req.rawBody = buf.toString('utf8');
+    }
+  })
+);
+
+// Ephemeral in-memory webhook secret fallback ONLY for non-production local simulation tests
+const DEV_EPHEMERAL_WEBHOOK_SECRET =
+  process.env.NODE_ENV === 'production' ? '' : crypto.randomBytes(32).toString('hex');
+
+// Verified payment confirmations received via webhook (bounded in-memory cache)
+const verifiedPayments = new Map<
+  string,
+  {
+    status: string;
+    hilowOrderId?: string;
+    amountInCents?: number;
+    customerName?: string;
+    customerEmail?: string;
+    total?: number;
+    verifiedAt: string;
+  }
+>();
+
+function sanitizeGatewayErrorMessage(error: unknown): string {
+  const rawMessage = error instanceof Error ? error.message : 'No se pudo iniciar el pago.';
+  return rawMessage.replace(/hilow(\s*global)?/gi, 'la pasarela de pago');
+}
+
+function decodeFirestoreRestField(field: any): any {
+  if (!field || typeof field !== 'object') return undefined;
+  if ('nullValue' in field) return null;
+  if ('booleanValue' in field) return Boolean(field.booleanValue);
+  if ('integerValue' in field) return Number(field.integerValue);
+  if ('doubleValue' in field) return Number(field.doubleValue);
+  if ('timestampValue' in field) return String(field.timestampValue);
+  if ('stringValue' in field) return String(field.stringValue);
+  if ('arrayValue' in field) {
+    return Array.isArray(field.arrayValue?.values)
+      ? field.arrayValue.values.map((v: any) => decodeFirestoreRestField(v))
+      : [];
+  }
+  if ('mapValue' in field) {
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(field.mapValue?.fields || {})) {
+      const val = decodeFirestoreRestField(v);
+      if (val !== undefined) out[k] = val;
+    }
+    return out;
+  }
+  return undefined;
+}
+
+async function readServerEmailConfig(): Promise<EmailConfig> {
+  const fallback = DEFAULT_SITE_CONFIG.email;
+  try {
+    const adminRes = await runWithAdminFirestore(async (adminDb) => {
+      const snap = await adminDb.collection('appSettings').doc('site').get();
+      return snap.exists ? (snap.data()?.siteConfig?.email as Partial<EmailConfig> | undefined) : undefined;
+    }, 'read-server-email-config');
+
+    let remoteEmail: Partial<EmailConfig> | undefined = adminRes.available ? adminRes.result : undefined;
+
+    if (!adminRes.available) {
+      const restUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+        projectId
+      )}/databases/${encodeURIComponent(databaseId)}/documents/appSettings/site`;
+      const resp = await fetch(restUrl).catch(() => null);
+      if (resp && resp.ok) {
+        const json: any = await resp.json().catch(() => null);
+        const siteCfg = decodeFirestoreRestField(json?.fields?.siteConfig);
+        remoteEmail = siteCfg?.email;
+      }
+    }
+
+    if (!remoteEmail) return fallback;
+    return {
+      ...fallback,
+      ...remoteEmail,
+      templates: {
+        auth: { ...fallback.templates.auth, ...(remoteEmail.templates?.auth || {}) },
+        orders: { ...fallback.templates.orders, ...(remoteEmail.templates?.orders || {}) },
+        subscriptions: {
+          ...fallback.templates.subscriptions,
+          ...(remoteEmail.templates?.subscriptions || {})
+        },
+        creators: { ...fallback.templates.creators, ...(remoteEmail.templates?.creators || {}) }
+      }
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+interface CreateHilowApiOrderParams {
+  yourInternalOrderId: string;
+  amountInCents: number;
+  productName: string;
+  isSubscription: boolean;
+  yourStoreUrl: string;
+  storeDomain?: string;
+  successUrl?: string;
+  cancelUrl?: string;
+}
+
+/**
+ * Crea un pedido a través del endpoint de API seguro de Hilow Global
+ * siguiendo la estructura probada de createHilowApiOrder.
+ */
+async function createHilowApiOrder({
+  yourInternalOrderId,
+  amountInCents,
+  productName,
+  isSubscription,
+  yourStoreUrl,
+  storeDomain,
+  successUrl,
+  cancelUrl
+}: CreateHilowApiOrderParams): Promise<{
+  success: boolean;
+  checkoutUrl?: string;
+  hilowOrderId?: string;
+  order?: Record<string, unknown>;
+  message?: string;
+  statusCode?: number;
+}> {
+  try {
+    const cleanBaseUrl = yourStoreUrl.replace(/\/+$/, '');
+    const parsedUrl = new URL(cleanBaseUrl);
+    const preferredStoreId = (
+      storeDomain ||
+      process.env.HILOW_STORE_ID ||
+      process.env.HILOW_STORE_DOMAIN ||
+      parsedUrl.hostname
+    ).trim();
+
+    const hilowApiBaseUrl = (process.env.HILOW_API_BASE_URL || 'https://hilowglobal.com').replace(
+      /\/+$/,
+      ''
+    );
+    const hilowPayOrigin = (process.env.HILOW_PAY_ORIGIN || 'https://hilowglobal.com').replace(
+      /\/+$/,
+      ''
+    );
+    const HILOW_API_ENDPOINT = `${hilowApiBaseUrl}/api/orders`;
+    const HILOW_API_KEY = process.env.HILOW_API_KEY?.trim();
+
+    if (!HILOW_API_KEY) {
+      return {
+        success: false,
+        statusCode: 503,
+        message: 'La pasarela de pago no está disponible temporalmente.'
+      };
+    }
+
+    const normalizedAmount = Math.round(Number(amountInCents));
+    if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) {
+      return {
+        success: false,
+        statusCode: 400,
+        message: 'El importe del pedido no es válido.'
+      };
+    }
+
+    const sendCreateOrder = async (candidateStoreId: string) => {
+      const candidatePayload = {
+        storeId: candidateStoreId,
+        internalOrderId: yourInternalOrderId,
+        amountInCents: normalizedAmount,
+        productName: productName || "Chloe's Secrets World - Compra",
+        isSubscription: Boolean(isSubscription),
+        successUrl:
+          successUrl ||
+          `${cleanBaseUrl}/checkout/success?order_id=${encodeURIComponent(yourInternalOrderId)}`,
+        cancelUrl: cancelUrl || `${cleanBaseUrl}/products`
+      };
+
+      const resp = await fetch(HILOW_API_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${HILOW_API_KEY}`
+        },
+        body: JSON.stringify(candidatePayload)
+      });
+      const data: any = await resp.json().catch(() => ({}));
+      return { resp, data, payload: candidatePayload };
+    };
+
+    let attempt = await sendCreateOrder(preferredStoreId);
+
+    // If ephemeral Cloud Run/preview hostname is rejected as Unauthorized domain, use registered preview domain
+    const errMsgLower = String(attempt.data?.message || attempt.data?.error || '').toLowerCase();
+    if (
+      !attempt.resp.ok &&
+      !storeDomain &&
+      !process.env.HILOW_STORE_ID &&
+      !process.env.HILOW_STORE_DOMAIN &&
+      preferredStoreId !== 'chloesecrets.ai.studio' &&
+      (errMsgLower.includes('unauthorized domain') || attempt.resp.status === 403)
+    ) {
+      attempt = await sendCreateOrder('chloesecrets.ai.studio');
+    }
+
+    const { resp: response, data: responseData, payload } = attempt;
+
+    if (!response.ok) {
+      throw new Error(
+        responseData?.message ||
+          responseData?.error ||
+          `Error en la pasarela de pago (${response.status}).`
+      );
+    }
+
+    const resolvedHilowOrderId =
+      responseData?.hilowOrderId || responseData?.id || responseData?.orderId || '';
+
+    if (resolvedHilowOrderId) {
+      const checkoutUrl = `${hilowPayOrigin}/pay/${resolvedHilowOrderId}`;
+      return {
+        success: true,
+        checkoutUrl,
+        hilowOrderId: resolvedHilowOrderId,
+        order: payload
+      };
+    }
+
+    if (
+      typeof responseData?.checkoutUrl === 'string' &&
+      responseData.checkoutUrl.startsWith('https://')
+    ) {
+      return {
+        success: true,
+        checkoutUrl: responseData.checkoutUrl,
+        order: payload
+      };
+    }
+
+    throw new Error('Respuesta no válida de la pasarela de pago.');
+  } catch (error) {
+    console.error('[PAYMENT] Gateway error:', error instanceof Error ? error.message : String(error));
+    return {
+      success: false,
+      statusCode: 502,
+      message: sanitizeGatewayErrorMessage(error)
+    };
+  }
+}
+
+function sanitizeRedirectUrl(
+  rawUrl: unknown,
+  allowedBaseUrl: string,
+  fallbackUrl: string
+): string {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim()) return fallbackUrl;
+  const trimmed = rawUrl.trim();
+  if (trimmed.startsWith('/')) {
+    return `${allowedBaseUrl.replace(/\/+$/, '')}${trimmed}`;
+  }
+  try {
+    const candidate = new URL(trimmed);
+    const base = new URL(allowedBaseUrl);
+    if (
+      (candidate.protocol === 'https:' || candidate.protocol === 'http:') &&
+      candidate.origin === base.origin
+    ) {
+      return candidate.toString();
+    }
+  } catch {
+    // Fall back to safe origin URL
+  }
+  return fallbackUrl;
+}
+
+/**
+ * 1. Endpoint Server-to-Server para Crear Pedido en la Pasarela de Pago
+ * POST /api/hilow/create-order
+ */
+app.post('/api/hilow/create-order', async (req, res) => {
+  try {
+    const {
+      internalOrderId,
+      productName,
+      isSubscription = false,
+      storeUrl,
+      successUrl,
+      cancelUrl,
+      storeDomain,
+      items,
+      promoCode,
+      shippingAddress,
+      selectedServiceId
+    } = req.body || {};
+
+    if (
+      typeof internalOrderId !== 'string' ||
+      !/^[a-zA-Z0-9_-]{3,128}$/.test(internalOrderId.trim())
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: 'Faltan parámetros obligatorios o el identificador de pedido no es válido.'
+      });
+    }
+
+    const cleanInternalOrderId = internalOrderId.trim();
+    const isSub = Boolean(isSubscription);
+
+    let authoritativeAmountInCents: number;
+    let authoritativeProductName: string;
+    let computedSummary: Awaited<ReturnType<typeof calculateServerOrderTotals>> | null = null;
+
+    if (isSub) {
+      // Suscripción mensual con tarifa autoritativa configurada desde Admin (appSettings/site)
+      const subConfig = await getAuthoritativeSubscriptionConfig();
+      authoritativeAmountInCents = subConfig.amountInCents;
+      authoritativeProductName = subConfig.planName;
+    } else {
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Debes incluir los artículos del carrito para calcular el importe verificado en el servidor.'
+        });
+      }
+
+      try {
+        computedSummary = await calculateServerOrderTotals({
+          items,
+          promoCode: typeof promoCode === 'string' ? promoCode : undefined,
+          shippingAddress:
+            shippingAddress && typeof shippingAddress === 'object' ? shippingAddress : undefined,
+          selectedServiceId: typeof selectedServiceId === 'string' ? selectedServiceId : undefined
+        });
+      } catch (pricingErr) {
+        if (pricingErr instanceof CheckoutPricingError) {
+          return res.status(pricingErr.statusCode).json({
+            success: false,
+            message: pricingErr.message,
+            error: pricingErr.message
+          });
+        }
+        throw pricingErr;
+      }
+
+      authoritativeAmountInCents = computedSummary.amountInCents;
+      const fallbackProductSummary =
+        computedSummary.items
+          .map((i) => `${i.quantity}x ${i.productName}`)
+          .join(', ')
+          .slice(0, 120) || "Chloe's Secrets World - Compra";
+      authoritativeProductName =
+        typeof productName === 'string' && productName.trim()
+          ? productName.trim().slice(0, 120)
+          : fallbackProductSummary;
+
+      // Si el pedido ya existe en Firestore con Admin SDK activo, sincronizar totales verificados
+      await runWithAdminFirestore(async (adminDb) => {
+        const orderRef = adminDb.collection('orders').doc(cleanInternalOrderId);
+        const existingSnap = await orderRef.get();
+        if (existingSnap.exists) {
+          await orderRef.set(
+            {
+              items: computedSummary!.items,
+              subtotal: computedSummary!.subtotal,
+              volumeDiscount: computedSummary!.volumeDiscount,
+              discount: computedSummary!.discount,
+              shipping: computedSummary!.shipping,
+              total: computedSummary!.total,
+              ...(computedSummary!.appliedPromoCode
+                ? { promoCodeApplied: computedSummary!.appliedPromoCode }
+                : {}),
+              updatedAt: new Date().toISOString()
+            },
+            { merge: true }
+          );
+        }
+      }, 'hilow-reconcile-order-totals').catch(() => undefined);
+    }
+
+    const forwardedProto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https')
+      .split(',')[0]
+      .trim();
+    const hostHeader = req.get('host');
+    const inferredOrigin = hostHeader ? `${forwardedProto}://${hostHeader}` : '';
+    const yourStoreUrl = String(process.env.APP_URL || inferredOrigin || storeUrl).trim();
+
+    if (!yourStoreUrl || !/^https?:\/\//i.test(yourStoreUrl)) {
+      return res.status(400).json({
+        success: false,
+        message: 'No se pudo determinar la URL base de la tienda para iniciar el pago.'
+      });
+    }
+
+    const baseClean = yourStoreUrl.replace(/\/+$/, '');
+    const defaultSuccess = `${baseClean}/checkout/success?order_id=${encodeURIComponent(cleanInternalOrderId)}`;
+    const defaultCancel = `${baseClean}/products`;
+
+    const result = await createHilowApiOrder({
+      yourInternalOrderId: cleanInternalOrderId,
+      amountInCents: authoritativeAmountInCents,
+      productName: authoritativeProductName,
+      isSubscription: isSub,
+      yourStoreUrl: baseClean,
+      storeDomain: typeof storeDomain === 'string' ? storeDomain : undefined,
+      successUrl: sanitizeRedirectUrl(successUrl, baseClean, defaultSuccess),
+      cancelUrl: sanitizeRedirectUrl(cancelUrl, baseClean, defaultCancel)
+    });
+
+    if (!result.success || !result.checkoutUrl) {
+      return res.status(result.statusCode || 502).json({
+        success: false,
+        message: result.message || 'No se pudo iniciar el pago.',
+        error: result.message || 'No se pudo iniciar el pago.'
+      });
+    }
+
+    return res.json({
+      success: true,
+      checkoutUrl: result.checkoutUrl,
+      paymentUrl: result.checkoutUrl,
+      hilowOrderId: result.hilowOrderId,
+      isSimulation: false,
+      order: result.order,
+      ...(computedSummary
+        ? {
+            pricing: {
+              items: computedSummary.items,
+              subtotal: computedSummary.subtotal,
+              volumeDiscount: computedSummary.volumeDiscount,
+              discount: computedSummary.discount,
+              shipping: computedSummary.shipping,
+              total: computedSummary.total,
+              amountInCents: computedSummary.amountInCents,
+              ...(computedSummary.appliedPromoCode
+                ? { appliedPromoCode: computedSummary.appliedPromoCode }
+                : {}),
+              ...(computedSummary.verifiedQuote
+                ? { verifiedQuote: computedSummary.verifiedQuote }
+                : {})
+            }
+          }
+        : {})
+    });
+  } catch (error) {
+    console.error('[PAYMENT] Server error creating order:', error instanceof Error ? error.message : String(error));
+    const message = sanitizeGatewayErrorMessage(error);
+    return res.status(500).json({ success: false, message, error: message });
+  }
+});
+
+function normalizeSignature(value: string) {
+  return value.trim().replace(/^sha256=/i, '').trim();
+}
+
+function safeSignatureEqual(received: string, expected: string) {
+  const a = Buffer.from(normalizeSignature(received), 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function getEventType(payload: Record<string, any>) {
+  const explicit = String(payload.eventType || payload.event || payload.type || '')
+    .toLowerCase()
+    .trim();
+  if (explicit) return explicit;
+  const fallbackStatus = String(payload.status || '').toLowerCase().trim();
+  if (['completed', 'paid', 'succeeded', 'success'].includes(fallbackStatus)) {
+    return 'payment.completed';
+  }
+  if (['failed', 'failure', 'error'].includes(fallbackStatus)) {
+    return 'payment.failed';
+  }
+  return '';
+}
+
+function isPaymentCompleted(eventType: string) {
+  return [
+    'payment.completed',
+    'payment.succeeded',
+    'payment.success',
+    'payment.renewal_succeeded',
+    'payment.renewed'
+  ].includes(eventType);
+}
+
+function isPaymentFailed(eventType: string) {
+  return ['payment.failed', 'payment.failure', 'payment.error'].includes(eventType);
+}
+
+function isSubscriptionCancelled(eventType: string) {
+  return ['subscription.cancelled', 'subscription.canceled'].includes(eventType);
+}
+
+function parseAmountInCents(payload: Record<string, any>): number {
+  if (payload.amountInCents !== undefined && payload.amountInCents !== null) {
+    const val = Number(payload.amountInCents);
+    return Number.isFinite(val) ? Math.round(val) : 0;
+  }
+  if (payload.amount !== undefined && payload.amount !== null) {
+    const val = Number(payload.amount);
+    if (!Number.isFinite(val)) return 0;
+    return Number.isInteger(val) ? val : Math.round(val * 100);
+  }
+  return 0;
+}
+
+function parseInternalOrderId(internalOrderId: string) {
+  const parts = internalOrderId.split('_');
+  const prefix = parts[0] || '';
+  const isSubscription = prefix === 'SUB';
+
+  let userId = 'guest';
+  let orderDocId = internalOrderId;
+
+  if (isSubscription) {
+    if (parts.length >= 4) {
+      // SUB_<userId>_<uniqueOrderId>_<timestamp>
+      userId = parts.slice(1, parts.length - 2).join('_') || 'guest';
+      orderDocId = internalOrderId;
+    } else if (parts.length === 3) {
+      // SUB_<userId>_<timestamp>
+      userId = parts[1] || 'guest';
+      orderDocId = internalOrderId;
+    }
+  } else if ((prefix === 'CS' || prefix === 'CPO') && parts.length >= 3) {
+    userId = parts.slice(1, -1).join('_') || 'guest';
+    orderDocId = internalOrderId;
+  }
+
+  return { prefix, isSubscription, userId, orderDocId };
+}
+
+// Logística Packlink PRO y generación de PDFs gestionada en ./src/server/shippingPdf.ts
+
+function buildSmtpTransportConfig(emailConfig?: EmailConfig) {
+  const smtpHost = process.env.SMTP_HOST?.trim();
+  const smtpAccount = process.env.SMTP_USER?.trim();
+  const smtpSecret = process.env.SMTP_PASS?.trim();
+  if (!smtpHost || !smtpAccount || !smtpSecret) return null;
+
+  const smtpPort = Number(process.env.SMTP_PORT) || 465;
+  const senderDisplay = (emailConfig?.senderName || "Chloe's Secrets World").replace(/"/g, '');
+  const senderMailbox =
+    emailConfig?.senderEmail?.trim() || DEFAULT_SITE_CONFIG.email.replyToEmail;
+  const fromHeader = process.env.EMAIL_FROM || `"${senderDisplay}" <${senderMailbox}>`;
+
+  return {
+    smtpHost,
+    smtpAccount,
+    smtpSecret,
+    smtpPort,
+    fromHeader
+  };
+}
+
+async function sendServerPaymentEmail(
+  order: Record<string, any>,
+  emailConfig?: EmailConfig
+) {
+  if (!order.customerEmail) {
+    return { skipped: true, reason: 'Recipient email missing' };
+  }
+
+  const smtpConfig = buildSmtpTransportConfig(emailConfig);
+  if (!smtpConfig) {
+    return { skipped: true, reason: 'SMTP not configured' };
+  }
+
+  const nodemailer = (await import('nodemailer')).default;
+  const transporter = nodemailer.createTransport({
+    host: smtpConfig.smtpHost,
+    port: smtpConfig.smtpPort,
+    secure: smtpConfig.smtpPort === 465,
+    auth: {
+      user: smtpConfig.smtpAccount,
+      pass: smtpConfig.smtpSecret
+    }
+  });
+
+  const rawItems = Array.isArray(order.items) ? order.items : [];
+  const totalEur = Number(order.total || 0);
+  const shippingEur = Number(order.shipping ?? order.shippingCost ?? 0);
+  const subjectTpl =
+    emailConfig?.templates?.orders?.orderConfirmation?.subject ||
+    "Confirmación de tu pedido #{orderId} - Chloe's Secrets World";
+
+  const html = renderOrderConfirmationEmailHtml(
+    {
+      id: String(order.id || ''),
+      userId: String(order.userId || 'guest'),
+      customerName: String(order.customerName || 'Cliente'),
+      customerEmail: String(order.customerEmail),
+      items: rawItems.map((it: Record<string, any>) => ({
+        productId: String(it.productId || 'item'),
+        productName: String(it.productName || it.name || 'Prenda Exclusiva'),
+        price: Number(it.price || 0),
+        quantity: Number(it.quantity || 1),
+        size: String(it.size || 'Única'),
+        color: String(it.color || 'Estándar'),
+        image: String(it.image || it.imageUrl || '')
+      })),
+      subtotal: Math.max(0, totalEur - shippingEur),
+      discount: Number(order.discount || 0),
+      shipping: shippingEur,
+      total: totalEur,
+      shippingAddress: {
+        street: String(order.shippingAddress?.street || order.shippingAddress?.line1 || 'Dirección registrada'),
+        city: String(order.shippingAddress?.city || ''),
+        postalCode: String(order.shippingAddress?.postalCode || order.shippingAddress?.postal_code || ''),
+        country: String(order.shippingAddress?.country || 'España'),
+        phone: String(order.shippingAddress?.phone || '')
+      },
+      status: 'paid',
+      createdAt: String(order.createdAt || new Date().toISOString())
+    },
+    { emailConfig }
+  );
+
+  const info = await transporter.sendMail({
+    from: smtpConfig.fromHeader,
+    to: order.customerEmail,
+    replyTo: emailConfig?.replyToEmail || undefined,
+    subject: subjectTpl.replaceAll('{orderId}', String(order.id || '')),
+    html
+  });
+
+  return { success: true, messageId: info.messageId };
+}
+
+function toMailjetOrder(rawOrder: Record<string, any>): MailjetOrder {
+  const rawItems = Array.isArray(rawOrder.items) ? rawOrder.items : [];
+  const addr = rawOrder.shippingAddress || {};
+  const totalEur = Number(rawOrder.total) || 0;
+  const shippingEur = Number(rawOrder.shipping ?? rawOrder.shippingCost) || 0;
+
+  return {
+    id: String(rawOrder.id || 'UNKNOWN'),
+    userId: String(rawOrder.userId || 'guest'),
+    createdAt: rawOrder.createdAt ? new Date(rawOrder.createdAt) : new Date(),
+    status: 'order_received',
+    total: Math.round(totalEur * 100),
+    shippingCost: Math.round(shippingEur * 100),
+    shippingFree: Boolean(rawOrder.shippingFree ?? shippingEur === 0),
+    items: rawItems.map((item: Record<string, any>) => ({
+      productId: String(item.productId || 'item'),
+      name: String(item.productName || item.name || 'Producto'),
+      price: Math.round((Number(item.price) || 0) * 100),
+      quantity: Number(item.quantity) || 1,
+      imageUrl: String(item.image || item.imageUrl || 'https://chloesecrets.com/placeholder.jpg')
+    })),
+    customerName: String(rawOrder.customerName || 'Cliente'),
+    customerEmail: String(rawOrder.customerEmail || ''),
+    shippingAddress: {
+      line1: addr.street || addr.line1 || null,
+      line2: addr.line2 || null,
+      city: addr.city || null,
+      state: addr.state || null,
+      postal_code: addr.postalCode || addr.postal_code || null,
+      country: addr.country || null,
+      phone: addr.phone || null
+    },
+    paymentMethod: 'hilow',
+    path: rawOrder.path || `orders/${String(rawOrder.id || 'UNKNOWN')}`,
+    packlink: rawOrder.packlink
+  };
+}
+
+/**
+ * 2a. Health Check del Webhook de Pasarela
+ * GET /api/webhooks/hilow
+ */
+app.get('/api/webhooks/hilow', (_req, res) => {
+  return res.json({
+    ok: true,
+    service: 'hilow-webhook',
+    configured: Boolean(process.env.HILOW_WEBHOOK_SECRET && process.env.HILOW_API_KEY),
+    endpoint: '/api/webhooks/hilow'
+  });
+});
+
+/**
+ * 2b. Endpoint Webhook de Confirmación de Pago (HMAC-SHA256 + Firestore + Packlink)
+ * POST /api/webhooks/hilow
+ */
+app.post('/api/webhooks/hilow', async (req: any, res) => {
+  const webhookSecret = process.env.HILOW_WEBHOOK_SECRET?.trim() || DEV_EPHEMERAL_WEBHOOK_SECRET;
+  const signature = String(
+    req.headers['hilow-signature'] || req.headers['x-hilow-signature'] || ''
+  ).trim();
+  const rawBody = req.rawBody || JSON.stringify(req.body || {});
+
+  if (!webhookSecret) {
+    console.error('[HILOW WEBHOOK] HILOW_WEBHOOK_SECRET no está configurado.');
+    return res.status(500).json({ error: 'Webhook no configurado' });
+  }
+
+  if (!signature) {
+    console.error('[HILOW WEBHOOK] Falta firma.');
+    return res.status(401).json({ error: 'Firma ausente' });
+  }
+
+  try {
+    const expectedSignature = crypto.createHmac('sha256', webhookSecret).update(rawBody).digest('hex');
+
+    if (!safeSignatureEqual(signature, expectedSignature)) {
+      console.error('[HILOW WEBHOOK] Firma inválida.');
+      return res.status(403).json({ error: 'Firma inválida' });
+    }
+
+    const payload = (
+      typeof req.body === 'object' && req.body !== null ? req.body : JSON.parse(rawBody)
+    ) as Record<string, any>;
+
+    const eventType = getEventType(payload);
+    const internalOrderId = String(payload.internalOrderId || payload.orderId || '').trim();
+    const hilowOrderId = payload.hilowOrderId || payload.paymentId || payload.id || null;
+    const amountInCents = parseAmountInCents(payload);
+
+    if (!internalOrderId || !/^[a-zA-Z0-9_-]{3,128}$/.test(internalOrderId)) {
+      return res.status(400).json({ error: 'internalOrderId no válido' });
+    }
+
+    if (!eventType) {
+      return res.status(400).json({ error: 'eventType no válido' });
+    }
+
+    const { prefix, isSubscription, userId, orderDocId } = parseInternalOrderId(internalOrderId);
+
+    console.log('[HILOW WEBHOOK] Evento recibido', {
+      eventType,
+      internalOrderId,
+      userId,
+      orderDocId,
+      hilowOrderId,
+      amountInCents
+    });
+
+    // Registro de auditoría no bloqueante en /webhookEvents
+    const safePayload = JSON.parse(JSON.stringify(payload));
+    await runWithAdminFirestore(
+      (adminDb) =>
+        adminDb
+          .collection('webhookEvents')
+          .doc(`${internalOrderId}_${Date.now()}`)
+          .set({
+            provider: 'hilow',
+            eventType,
+            internalOrderId,
+            hilowOrderId,
+            amountInCents,
+            receivedAt: new Date().toISOString(),
+            payload: safePayload
+          }),
+      'hilow-webhook-audit'
+    ).catch((auditErr) => {
+      console.warn(
+        '[HILOW WEBHOOK] Auditoría omitida:',
+        auditErr instanceof Error ? auditErr.message : String(auditErr)
+      );
+    });
+
+    if (isPaymentCompleted(eventType)) {
+      const dbResult = await runWithAdminFirestore(async (adminFirestore) => {
+        const orderRef = adminFirestore.collection('orders').doc(orderDocId);
+        let orderSnap = await orderRef.get();
+
+        // Respaldo: buscar por campo id o por segmento BOX-... si el ID del documento difiere del internalOrderId
+        let resolvedOrderRef = orderRef;
+        if (!orderSnap.exists) {
+          const fallbackQuery = await adminFirestore
+            .collection('orders')
+            .where('id', '==', orderDocId)
+            .limit(1)
+            .get();
+          if (!fallbackQuery.empty) {
+            orderSnap = fallbackQuery.docs[0];
+            resolvedOrderRef = fallbackQuery.docs[0].ref;
+          } else if (isSubscription) {
+            const subParts = internalOrderId.split('_');
+            const shortBoxId = subParts.length >= 4 ? subParts[subParts.length - 2] : '';
+            if (shortBoxId) {
+              const boxSnap = await adminFirestore.collection('orders').doc(shortBoxId).get();
+              if (boxSnap.exists) {
+                orderSnap = boxSnap;
+                resolvedOrderRef = boxSnap.ref;
+              }
+            }
+          }
+        }
+
+        const existingOrder = orderSnap.exists ? (orderSnap.data() as Record<string, any>) : null;
+        const resolvedUserId = String(existingOrder?.userId || userId || 'guest');
+
+        // Validación de importe (1 céntimo de tolerancia; en Chloe's Secrets total está en Euros)
+        if (orderSnap.exists && payload.amountInCents !== undefined && payload.amountInCents !== null) {
+          const receivedCents = Math.round(Number(payload.amountInCents));
+          const expectedCents = Math.round((Number(existingOrder?.total) || 0) * 100);
+          if (
+            Number.isFinite(receivedCents) &&
+            receivedCents > 0 &&
+            Number.isFinite(expectedCents) &&
+            expectedCents > 0 &&
+            Math.abs(receivedCents - expectedCents) > 1
+          ) {
+            console.error('[HILOW WEBHOOK] Importe no coincide con el pedido:', {
+              internalOrderId,
+              receivedCents,
+              expectedCents
+            });
+            return { kind: 'amount_mismatch' as const };
+          }
+        }
+
+        // Idempotencia: evita repetir puntos/correos si el webhook ya se procesó
+        const paidStatuses = ['paid', 'order_received', 'processing', 'shipped', 'delivered'];
+        if (existingOrder?.status && paidStatuses.includes(String(existingOrder.status))) {
+          return { kind: 'already_paid' as const, existingStatus: String(existingOrder.status), finalOrder: existingOrder };
+        }
+
+        const nowIso = new Date().toISOString();
+        const orderData: Record<string, any> = {
+          status: 'paid',
+          paidAt: nowIso,
+          hilowPaymentId: hilowOrderId || undefined,
+          updatedAt: nowIso
+        };
+
+        // Si el documento no existía (falló el guardado previo), reconstruirlo para no perder el cobro
+        if (!orderSnap.exists) {
+          const fallbackTotalEur = Number(((amountInCents || 0) / 100).toFixed(2));
+          orderData.id = orderDocId;
+          orderData.userId = resolvedUserId === 'guest' ? null : resolvedUserId;
+          orderData.isGuest = resolvedUserId === 'guest';
+          orderData.customerEmail = payload.email || payload.customerEmail || 'cliente@chloesecrets.com';
+          orderData.customerName = payload.customerName || payload.name || 'Cliente VIP';
+          orderData.subtotal = fallbackTotalEur;
+          orderData.discount = 0;
+          orderData.shipping = 0;
+          orderData.total = fallbackTotalEur;
+          orderData.paymentMethod = 'hilow';
+          orderData.reconstructedFromWebhook = true;
+          orderData.createdAt = nowIso;
+          orderData.shippingAddress = {
+            street: payload.address || 'Dirección pendiente de confirmar',
+            city: payload.city || '-',
+            state: payload.state || '-',
+            postalCode: payload.postalCode || '00000',
+            country: payload.country || 'España',
+            phone: payload.phone || '-'
+          };
+          orderData.items = [
+            {
+              productId: 'paid_order',
+              productName: String(payload.productName || payload.description || "Pedido Chloe's Secrets World"),
+              price: fallbackTotalEur,
+              quantity: 1,
+              color: 'Estándar',
+              size: 'Única',
+              image: ''
+            }
+          ];
+        }
+
+        await resolvedOrderRef.set(orderData, { merge: true });
+
+        // Puntos de fidelidad VIP (1 punto por cada Euro)
+        const orderTotalEur = Number(existingOrder?.total ?? orderData.total ?? 0);
+        const points = Math.max(
+          1,
+          Math.floor(amountInCents ? amountInCents / 100 : orderTotalEur)
+        );
+        if (points > 0 && resolvedUserId && resolvedUserId !== 'guest') {
+          const userRef = adminFirestore.collection('users').doc(resolvedUserId);
+          await userRef.set(
+            {
+              loyaltyPoints: FieldValue.increment(points),
+              ...(isSubscription
+                ? {
+                    isSubscribed: true,
+                    subscriptionStatus: 'active',
+                    lastSubscriptionPayment: nowIso
+                  }
+                : {}),
+              updatedAt: nowIso
+            },
+            { merge: true }
+          );
+        }
+
+        // Aplicar cooldown post-venta automático (oculto/re-stock de artículos vendidos)
+        if (!isSubscription && Array.isArray(existingOrder?.items)) {
+          for (const soldItem of existingOrder.items) {
+            const prodId = String(soldItem?.productId || '').trim();
+            if (!prodId || prodId === 'paid_order' || prodId === 'subscription_club') continue;
+            try {
+              const prodRef = adminFirestore.collection('products').doc(prodId);
+              const prodSnap = await prodRef.get();
+              const cooldownDays =
+                prodSnap.exists && typeof prodSnap.data()?.cooldownDays === 'number'
+                  ? Math.max(1, Math.min(30, Number(prodSnap.data()?.cooldownDays)))
+                  : 4;
+              const cooldownUntil = new Date(
+                Date.now() + cooldownDays * 24 * 60 * 60 * 1000
+              ).toISOString();
+              await prodRef.set(
+                {
+                  availabilityStatus: 'cooldown',
+                  inStock: false,
+                  cooldownUntil,
+                  lastSoldAt: nowIso,
+                  updatedAt: nowIso
+                },
+                { merge: true }
+              );
+            } catch (cdErr) {
+              console.warn(`[HILOW WEBHOOK] Cooldown update skipped for ${prodId}:`, cdErr);
+            }
+          }
+        }
+
+        const finalSnap = await resolvedOrderRef.get();
+        return {
+          kind: 'updated' as const,
+          finalOrder: finalSnap.exists ? ({ ...finalSnap.data(), id: orderDocId } as Record<string, any>) : null
+        };
+      }, 'hilow-webhook-payment-completed');
+
+      if (dbResult.available && dbResult.result.kind === 'amount_mismatch') {
+        return res.status(400).json({ error: 'Importe del pago no coincide' });
+      }
+
+      const existingOrFallbackOrder =
+        dbResult.available && dbResult.result.finalOrder ? dbResult.result.finalOrder : null;
+
+      if (dbResult.available && dbResult.result.kind === 'already_paid') {
+        verifiedPayments.set(internalOrderId, {
+          status: 'paid',
+          hilowOrderId: typeof hilowOrderId === 'string' ? hilowOrderId : undefined,
+          amountInCents,
+          customerName: existingOrFallbackOrder?.customerName,
+          customerEmail: existingOrFallbackOrder?.customerEmail,
+          total: existingOrFallbackOrder?.total,
+          verifiedAt: new Date().toISOString()
+        });
+        return res.status(200).json({ received: true, processed: 'already_paid' });
+      }
+
+      // Guardar en caché en memoria del servidor para confirmación instantánea de polling
+      if (verifiedPayments.size > 1000) {
+        const oldestKey = verifiedPayments.keys().next().value;
+        if (oldestKey) verifiedPayments.delete(oldestKey);
+      }
+      verifiedPayments.set(internalOrderId, {
+        status: 'paid',
+        hilowOrderId: typeof hilowOrderId === 'string' ? hilowOrderId : undefined,
+        amountInCents,
+        customerName: existingOrFallbackOrder?.customerName || payload.customerName || payload.name,
+        customerEmail: existingOrFallbackOrder?.customerEmail || payload.email || payload.customerEmail,
+        total:
+          existingOrFallbackOrder?.total ??
+          (amountInCents ? Number((amountInCents / 100).toFixed(2)) : undefined),
+        verifiedAt: new Date().toISOString()
+      });
+
+      const finalOrder =
+        dbResult.available && dbResult.result.finalOrder
+          ? dbResult.result.finalOrder
+          : {
+              id: orderDocId,
+              userId: userId || 'guest',
+              isGuest: userId === 'guest',
+              customerName: payload.customerName || payload.name || 'Cliente VIP',
+              customerEmail: payload.email || payload.customerEmail || '',
+              total: (amountInCents || 0) / 100
+            };
+
+      // Sincronizar envío Packlink (si aplica y autoCreateShipmentOnPaid está activo) y adjuntar PDF de etiqueta / hoja discreta al email del administrador
+      let syncedPacklinkMeta = finalOrder.packlink;
+      if (!isSubscription && (prefix === 'CS' || prefix === 'CPO')) {
+        const plCfg = await readPacklinkSettings().catch(() => null);
+        if (!plCfg || plCfg.autoCreateShipmentOnPaid !== false) {
+          syncedPacklinkMeta = await syncOrderPacklinkShipment(finalOrder, {
+            docPath: `orders/${orderDocId}`
+          }).catch(() => finalOrder.packlink);
+          if (syncedPacklinkMeta) {
+            finalOrder.packlink = syncedPacklinkMeta;
+          }
+        }
+      }
+
+      const adminShippingAttachments =
+        !isSubscription
+          ? await buildAdminShippingEmailAttachments(finalOrder).catch(() => [])
+          : [];
+
+      // Tareas secundarias no bloqueantes (correo Mailjet o respaldo SMTP + auditoría de log)
+      const tasks: Promise<unknown>[] = [];
+      const serverEmailConfig = await readServerEmailConfig().catch(() => DEFAULT_SITE_CONFIG.email);
+      if (process.env.MAILJET_API_KEY && process.env.MAILJET_SECRET_KEY) {
+        const mailjetOrder = toMailjetOrder(finalOrder);
+        tasks.push(sendOrderReceivedEmail(mailjetOrder, serverEmailConfig));
+        tasks.push(sendAdminNewOrderEmail(mailjetOrder, adminShippingAttachments, serverEmailConfig));
+        if (isSubscription) {
+          tasks.push(sendSubscriptionStatusEmail(mailjetOrder, 'active', serverEmailConfig));
+        }
+      } else {
+        tasks.push(sendServerPaymentEmail(finalOrder, serverEmailConfig));
+      }
+      if (finalOrder?.customerEmail) {
+        const logId = `log_webhook_${orderDocId}_${Date.now()}`;
+        const emailSentViaGateway = Boolean(
+          (process.env.MAILJET_API_KEY && process.env.MAILJET_SECRET_KEY) ||
+          (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS)
+        );
+        tasks.push(
+          runWithAdminFirestore(
+            (adminDb) =>
+              adminDb.collection('email_logs').doc(logId).set({
+                id: logId,
+                orderId: orderDocId,
+                to: String(finalOrder.customerEmail),
+                recipientName: String(finalOrder.customerName || 'Cliente VIP'),
+                subject: `Confirmación oficial · Pedido #${orderDocId}`,
+                status: emailSentViaGateway ? 'sent' : 'pending',
+                timestamp: new Date().toISOString(),
+                source: process.env.MAILJET_API_KEY ? 'mailjet_webhook' : 'smtp_webhook'
+              }),
+            'webhook-email-log'
+          ).catch(() => undefined)
+        );
+      }
+      await Promise.allSettled(tasks);
+
+      return res.status(200).json({ received: true, processed: 'payment_completed', orderId: orderDocId });
+    }
+
+    if (isPaymentFailed(eventType)) {
+      verifiedPayments.set(internalOrderId, {
+        status: 'issue',
+        hilowOrderId: typeof hilowOrderId === 'string' ? hilowOrderId : undefined,
+        amountInCents,
+        verifiedAt: new Date().toISOString()
+      });
+
+      await runWithAdminFirestore(async (adminFirestore) => {
+        const nowIso = new Date().toISOString();
+        const orderRef = adminFirestore.collection('orders').doc(orderDocId);
+        await orderRef.set(
+          {
+            status: 'issue',
+            paymentFailureAt: nowIso,
+            updatedAt: nowIso
+          },
+          { merge: true }
+        );
+        if (isSubscription && userId !== 'guest') {
+          await adminFirestore
+            .collection('users')
+            .doc(userId)
+            .set({ subscriptionStatus: 'past_due', updatedAt: nowIso }, { merge: true });
+        }
+      }, 'hilow-webhook-payment-failed');
+
+      if (
+        isSubscription &&
+        process.env.MAILJET_API_KEY &&
+        process.env.MAILJET_SECRET_KEY &&
+        (payload.email || payload.customerEmail)
+      ) {
+        const fallbackSub = amountInCents
+          ? { amountInCents }
+          : await getAuthoritativeSubscriptionConfig();
+        const serverEmailConfig = await readServerEmailConfig().catch(() => DEFAULT_SITE_CONFIG.email);
+        await sendSubscriptionStatusEmail(
+          toMailjetOrder({
+            id: orderDocId,
+            userId,
+            customerName: payload.customerName || payload.name || 'Cliente',
+            customerEmail: payload.email || payload.customerEmail,
+            total: (amountInCents || fallbackSub.amountInCents) / 100
+          }),
+          'past_due',
+          serverEmailConfig
+        ).catch(() => undefined);
+      }
+
+      return res.status(200).json({ received: true, processed: 'payment_failed' });
+    }
+
+    if (isSubscriptionCancelled(eventType)) {
+      await runWithAdminFirestore(async (adminFirestore) => {
+        if (userId !== 'guest') {
+          await adminFirestore
+            .collection('users')
+            .doc(userId)
+            .set(
+              {
+                isSubscribed: false,
+                subscriptionStatus: 'cancelled',
+                updatedAt: new Date().toISOString()
+              },
+              { merge: true }
+            );
+        }
+      }, 'hilow-webhook-subscription-cancelled');
+
+      if (
+        process.env.MAILJET_API_KEY &&
+        process.env.MAILJET_SECRET_KEY &&
+        (payload.email || payload.customerEmail)
+      ) {
+        const fallbackSub = amountInCents
+          ? { amountInCents }
+          : await getAuthoritativeSubscriptionConfig();
+        const serverEmailConfig = await readServerEmailConfig().catch(() => DEFAULT_SITE_CONFIG.email);
+        await sendSubscriptionStatusEmail(
+          toMailjetOrder({
+            id: orderDocId,
+            userId,
+            customerName: payload.customerName || payload.name || 'Cliente',
+            customerEmail: payload.email || payload.customerEmail,
+            total: (amountInCents || fallbackSub.amountInCents) / 100
+          }),
+          'cancelled',
+          serverEmailConfig
+        ).catch(() => undefined);
+      }
+
+      return res.status(200).json({ received: true, processed: 'subscription_cancelled' });
+    }
+
+    console.warn('[HILOW WEBHOOK] Evento no mapeado:', eventType);
+    return res.status(200).json({ received: true, processed: 'ignored_event', eventType });
+  } catch (error: any) {
+    const isAuthError = isAdminCredentialError(error);
+    console.error('[HILOW WEBHOOK] Error crítico:', {
+      category: isAuthError ? 'firebase_admin_credentials_invalid_or_revoked' : 'unexpected_runtime_error',
+      code: error?.code,
+      message: error?.message || String(error)
+    });
+    return res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+async function createOrderViaUserRest(
+  orderPayload: Record<string, any>,
+  userId: string,
+  orderDocId: string,
+  idToken: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const decoded = await verifyFirebaseIdToken(idToken);
+    if (!decoded || decoded.uid !== userId) {
+      return { success: false, error: 'La sesión del usuario no coincide con el pedido.' };
+    }
+
+    const now = new Date();
+    const docFields: Record<string, unknown> = {};
+    const bodyObject: Record<string, unknown> = {
+      ...orderPayload,
+      id: orderDocId,
+      userId,
+      isGuest: false,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString()
+    };
+
+    for (const [key, val] of Object.entries(bodyObject)) {
+      if (val !== undefined) {
+        docFields[key] = toFirestoreRestValue(val);
+      }
+    }
+
+    const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+      projectId
+    )}/databases/${encodeURIComponent(databaseId)}/documents/orders/${encodeURIComponent(
+      orderDocId
+    )}`;
+
+    const res = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ fields: docFields })
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      return {
+        success: false,
+        error: errText || 'No se pudo registrar el pedido con tu sesión de usuario.'
+      };
+    }
+
+    return { success: true };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Error guardando el pedido con token de usuario.'
+    };
+  }
+}
+
+async function createCheckoutOrderServer(
+  data: Record<string, any> & { idToken?: string }
+): Promise<{ success: boolean; error?: string }> {
+  const { idToken, ...orderFields } = data;
+  const orderDocId = String(orderFields.id || orderFields.orderId || '').trim();
+  const rawUid = orderFields.userId;
+  const userId = rawUid && rawUid !== 'guest' ? String(rawUid) : 'guest';
+
+  if (!orderDocId || !/^[a-zA-Z0-9_-]{3,128}$/.test(orderDocId)) {
+    return { success: false, error: 'Identificador de pedido inválido.' };
+  }
+
+  let credentialBlocked = !areAdminCredentialsAvailable();
+
+  if (!credentialBlocked) {
+    try {
+      const adminRes = await runWithAdminFirestore(async (adminDb) => {
+        const nowIso = new Date().toISOString();
+        await adminDb
+          .collection('orders')
+          .doc(orderDocId)
+          .set(
+            {
+              ...orderFields,
+              id: orderDocId,
+              userId: userId === 'guest' ? null : userId,
+              isGuest: userId === 'guest',
+              createdAt: orderFields.createdAt || nowIso,
+              updatedAt: nowIso
+            },
+            { merge: true }
+          );
+
+        const promoCode = String(
+          orderFields.promoCodeApplied || orderFields.coupon?.code || ''
+        )
+          .trim()
+          .toUpperCase();
+        if (promoCode) {
+          try {
+            const promoSnap = await adminDb
+              .collection('promoCodes')
+              .where('code', '==', promoCode)
+              .limit(1)
+              .get();
+            if (!promoSnap.empty) {
+              await promoSnap.docs[0].ref.update({
+                usesCount: FieldValue.increment(1),
+                updatedAt: nowIso
+              });
+            }
+          } catch (promoErr) {
+            console.info(
+              '[createCheckoutOrder] No se pudo incrementar usesCount del cupón:',
+              promoErr instanceof Error ? promoErr.message : String(promoErr)
+            );
+          }
+        }
+      }, 'checkout createOrder');
+
+      if (adminRes.available) {
+        return { success: true };
+      }
+      credentialBlocked = true;
+    } catch (error) {
+      if (isAdminCredentialError(error)) {
+        credentialBlocked = true;
+      } else {
+        console.error(
+          '[createCheckoutOrder] Error creating order in Firestore:',
+          error instanceof Error ? error.message : String(error)
+        );
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Error al guardar el pedido en Firestore.'
+        };
+      }
+    }
+  }
+
+  if (credentialBlocked && userId !== 'guest' && idToken) {
+    return createOrderViaUserRest(orderFields, userId, orderDocId, idToken);
+  }
+
+  return {
+    success: false,
+    error: 'Credenciales de servidor de Firebase Admin no activas en este entorno.'
+  };
+}
+
+async function getCheckoutOrderStatusServer(orderId: string): Promise<{
+  exists: boolean;
+  status?: string;
+  total?: number;
+  isGuest?: boolean;
+  customerName?: string;
+  customerEmail?: string;
+}> {
+  if (!areAdminCredentialsAvailable()) {
+    return { exists: false };
+  }
+
+  try {
+    const res = await runWithAdminFirestore(async (adminDb) => {
+      const snap = await adminDb.collection('orders').doc(orderId).get();
+      if (snap.exists) {
+        const d = snap.data();
+        return {
+          exists: true,
+          status: d?.status,
+          total: d?.total,
+          isGuest: d?.isGuest ?? !d?.userId,
+          customerName: d?.customerName,
+          customerEmail: d?.customerEmail
+        };
+      }
+      const querySnap = await adminDb
+        .collection('orders')
+        .where('id', '==', orderId)
+        .limit(1)
+        .get();
+      if (!querySnap.empty) {
+        const d = querySnap.docs[0].data();
+        return {
+          exists: true,
+          status: d?.status,
+          total: d?.total,
+          isGuest: d?.isGuest ?? !d?.userId,
+          customerName: d?.customerName,
+          customerEmail: d?.customerEmail
+        };
+      }
+      return { exists: false };
+    }, 'checkout getOrderStatus');
+
+    return res.available ? res.result : { exists: false };
+  } catch (error) {
+    if (!isAdminCredentialError(error)) {
+      console.info(
+        '[getCheckoutOrderStatus] Error checking order status:',
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+    return { exists: false };
+  }
+}
+
+/**
+ * 2c. Registro / Sincronización de pedido en servidor y actualización de uso de cupones
+ * POST /api/checkout/create-order
+ */
+app.post('/api/checkout/create-order', async (req, res) => {
+  try {
+    const payload = { ...(req.body || {}) };
+    const authHeader = String(req.headers.authorization || '');
+    const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : undefined;
+
+    const orderDocId = String(payload.id || payload.orderId || '');
+    const isSubscriptionOrder = orderDocId.startsWith('SUB_');
+
+    if (!isSubscriptionOrder && Array.isArray(payload.items) && payload.items.length > 0) {
+      try {
+        const computed = await calculateServerOrderTotals({
+          items: payload.items,
+          promoCode: payload.promoCodeApplied || payload.coupon?.code,
+          shippingAddress: payload.shippingAddress,
+          selectedServiceId: payload.packlink?.serviceId
+        });
+        payload.items = computed.items;
+        payload.subtotal = computed.subtotal;
+        payload.volumeDiscount = computed.volumeDiscount;
+        payload.discount = computed.discount;
+        payload.shipping = computed.shipping;
+        payload.total = computed.total;
+        if (computed.appliedPromoCode) {
+          payload.promoCodeApplied = computed.appliedPromoCode;
+        } else {
+          delete payload.promoCodeApplied;
+        }
+      } catch (pricingErr) {
+        if (pricingErr instanceof CheckoutPricingError) {
+          return res.status(pricingErr.statusCode).json({
+            success: false,
+            message: pricingErr.message
+          });
+        }
+      }
+    }
+
+    const result = await createCheckoutOrderServer({
+      ...payload,
+      idToken: payload.idToken || bearerToken
+    });
+
+    if (!result.success) {
+      return res.status(202).json({
+        success: false,
+        deferredToClient: true,
+        message: result.error
+      });
+    }
+
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      message: err?.message || 'Error guardando pedido en el servidor.'
+    });
+  }
+});
+
+/**
+ * 2d. Endpoint listo para futuras suscripciones VIP mensuales (BOX-<timestamp>)
+ * POST /api/create-subscription
+ */
+app.post('/api/create-subscription', async (req, res) => {
+  try {
+    const {
+      userId: bodyUserId,
+      orderId: bodyOrderId,
+      customerEmail,
+      userEmail,
+      customerName,
+      userName,
+      shippingAddress,
+      successUrl: bodySuccessUrl,
+      cancelUrl: bodyCancelUrl,
+      idToken
+    } = req.body || {};
+
+    const resolvedEmail = String(customerEmail || userEmail || '').trim();
+    const resolvedName = String(
+      customerName || userName || (resolvedEmail ? resolvedEmail.split('@')[0] : 'Suscriptor VIP')
+    ).trim();
+
+    if (!resolvedEmail) {
+      return res.status(400).json({
+        success: false,
+        error: 'El correo electrónico es obligatorio para iniciar la suscripción.',
+        message: 'El correo electrónico es obligatorio para iniciar la suscripción.'
+      });
+    }
+
+    const authHeader = String(req.headers.authorization || '');
+    const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : idToken;
+    const verifiedUser = bearerToken ? await verifyFirebaseIdToken(bearerToken) : null;
+    const resolvedUserId =
+      verifiedUser?.uid ||
+      (typeof bodyUserId === 'string' && bodyUserId.trim() ? bodyUserId.trim() : 'guest');
+
+    const timestamp = Date.now();
+    const uniqueOrderId = `BOX-${timestamp}`;
+    const structuredInternalOrderId =
+      typeof bodyOrderId === 'string' && /^[a-zA-Z0-9_-]{3,128}$/.test(bodyOrderId.trim())
+        ? bodyOrderId.trim()
+        : `SUB_${resolvedUserId}_${uniqueOrderId}_${timestamp}`;
+
+    // Tarifa autoritativa configurada desde Admin (ignora cualquier amountInCents del cliente)
+    const {
+      priceEur: totalEur,
+      amountInCents: subscriptionPriceCents,
+      planName: subscriptionPlanName
+    } = await getAuthoritativeSubscriptionConfig();
+
+    // Pre-registrar pedido pendiente en Firestore (status pending_payment)
+    await createCheckoutOrderServer({
+      id: structuredInternalOrderId,
+      orderId: structuredInternalOrderId,
+      userId: resolvedUserId === 'guest' ? null : resolvedUserId,
+      isGuest: resolvedUserId === 'guest',
+      customerEmail: resolvedEmail,
+      customerName: resolvedName,
+      items: [
+        {
+          productId: 'subscription_club',
+          productName: subscriptionPlanName,
+          price: totalEur,
+          quantity: 1,
+          color: 'Colección Exclusiva',
+          size: 'Personalizada',
+          image: ''
+        }
+      ],
+      subtotal: totalEur,
+      discount: 0,
+      shipping: 0,
+      total: totalEur,
+      status: 'pending_payment',
+      paymentMethod: 'hilow',
+      shippingAddress: shippingAddress || {
+        street: 'Pendiente de confirmar',
+        city: 'Madrid',
+        postalCode: '28001',
+        country: 'España'
+      },
+      idToken: bearerToken
+    }).catch(() => undefined);
+
+    const forwardedProto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https')
+      .split(',')[0]
+      .trim();
+    const hostHeader = req.get('host');
+    const inferredOrigin = hostHeader ? `${forwardedProto}://${hostHeader}` : '';
+    const yourStoreUrl = String(process.env.APP_URL || inferredOrigin).trim();
+
+    const baseUrlClean = yourStoreUrl.replace(/\/+$/, '');
+    const safeSuccessUrl = sanitizeRedirectUrl(
+      bodySuccessUrl,
+      baseUrlClean,
+      `${baseUrlClean}/subscription/success?order_id=${encodeURIComponent(structuredInternalOrderId)}`
+    );
+    const safeCancelUrl = sanitizeRedirectUrl(
+      bodyCancelUrl,
+      baseUrlClean,
+      `${baseUrlClean}/subscription`
+    );
+
+    const hilowSession = await createHilowApiOrder({
+      yourInternalOrderId: structuredInternalOrderId,
+      amountInCents: subscriptionPriceCents,
+      productName: subscriptionPlanName,
+      isSubscription: true,
+      yourStoreUrl: baseUrlClean,
+      successUrl: safeSuccessUrl,
+      cancelUrl: safeCancelUrl
+    });
+
+    if (!hilowSession.success || !hilowSession.checkoutUrl) {
+      return res.status(hilowSession.statusCode || 502).json({
+        success: false,
+        error: hilowSession.message || 'La pasarela de pago no está disponible temporalmente.',
+        message: hilowSession.message || 'La pasarela de pago no está disponible temporalmente.'
+      });
+    }
+
+    return res.json({
+      success: true,
+      orderId: uniqueOrderId,
+      internalOrderId: structuredInternalOrderId,
+      checkoutUrl: hilowSession.checkoutUrl,
+      url: hilowSession.checkoutUrl,
+      hilowOrderId: hilowSession.hilowOrderId
+    });
+  } catch (error) {
+    console.error(
+      '[SUBSCRIPTION] Error creating subscription:',
+      error instanceof Error ? error.message : String(error)
+    );
+    return res.status(500).json({
+      success: false,
+      error: sanitizeGatewayErrorMessage(error),
+      message: sanitizeGatewayErrorMessage(error)
+    });
+  }
+});
+
+/**
+ * 2e. Consulta de estado verificado (Webhook caché + Firestore Admin)
+ * GET /api/checkout/order-status/:orderId
+ * GET /api/checkout/order-status?orderId=...
+ * GET /api/hilow/order-status/:internalOrderId
+ */
+const orderStatusHandler = async (req: express.Request, res: express.Response) => {
+  const orderId = String(
+    req.params.orderId || req.params.internalOrderId || req.query.orderId || ''
+  ).trim();
+  if (!orderId || !/^[a-zA-Z0-9_-]{3,128}$/.test(orderId)) {
+    return res.status(400).json({ success: false, paid: false, message: 'ID de pedido inválido.' });
+  }
+
+  const record = verifiedPayments.get(orderId);
+  if (record?.status === 'paid' || record?.status === 'order_received') {
+    return res.json({
+      success: true,
+      exists: true,
+      paid: true,
+      status: record.status,
+      total: record.total,
+      customerName: record.customerName,
+      customerEmail: record.customerEmail,
+      orderId,
+      verifiedAt: record.verifiedAt
+    });
+  }
+
+  if (record?.status === 'issue') {
+    return res.json({
+      success: true,
+      exists: true,
+      paid: false,
+      failed: true,
+      status: 'issue',
+      orderId,
+      verifiedAt: record.verifiedAt
+    });
+  }
+
+  const dbStatus = await getCheckoutOrderStatusServer(orderId);
+  if (dbStatus.exists) {
+    const isPaid = ['paid', 'order_received', 'processing', 'shipped', 'delivered'].includes(
+      String(dbStatus.status || '')
+    );
+    return res.json({
+      success: true,
+      exists: true,
+      paid: isPaid,
+      failed: dbStatus.status === 'issue',
+      status: dbStatus.status || 'pending_payment',
+      total: dbStatus.total,
+      isGuest: dbStatus.isGuest,
+      customerName: dbStatus.customerName,
+      customerEmail: dbStatus.customerEmail,
+      orderId
+    });
+  }
+
+  return res.json({
+    success: true,
+    exists: false,
+    paid: false,
+    status: 'pending_payment',
+    orderId
+  });
+};
+
+app.get('/api/hilow/order-status/:internalOrderId', orderStatusHandler);
+app.get('/api/checkout/order-status/:orderId', orderStatusHandler);
+app.get('/api/checkout/order-status', orderStatusHandler);
+
+/**
+ * 3. Endpoint de Simulación Webhook (solo disponible fuera de producción)
+ * POST /api/hilow/simulate-payment-success
+ */
+app.post('/api/hilow/simulate-payment-success', async (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ success: false, message: 'No disponible en producción.' });
+  }
+
+  try {
+    const { internalOrderId, amountInCents } = req.body || {};
+    if (typeof internalOrderId !== 'string' || !internalOrderId.trim()) {
+      return res.status(400).json({ success: false, message: 'Falta internalOrderId.' });
+    }
+
+    const webhookSecret = process.env.HILOW_WEBHOOK_SECRET?.trim() || DEV_EPHEMERAL_WEBHOOK_SECRET;
+    const payload = {
+      internalOrderId: internalOrderId.trim(),
+      amountInCents: Number(amountInCents) || 7999,
+      status: 'completed',
+      timestamp: new Date().toISOString()
+    };
+
+    const signature = crypto
+      .createHmac('sha256', webhookSecret)
+      .update(JSON.stringify(payload))
+      .digest('hex');
+
+    verifiedPayments.set(internalOrderId.trim(), {
+      status: 'paid',
+      amountInCents: payload.amountInCents,
+      verifiedAt: payload.timestamp
+    });
+
+    // Sincronizar también en Firestore si Firebase Admin está activo en desarrollo
+    await runWithAdminFirestore(async (adminDb) => {
+      await adminDb.collection('orders').doc(internalOrderId.trim()).set(
+        {
+          status: 'paid',
+          paidAt: payload.timestamp,
+          updatedAt: payload.timestamp
+        },
+        { merge: true }
+      );
+    }, 'hilow-simulate-payment').catch(() => undefined);
+
+    return res.json({
+      success: true,
+      simulatedPayload: payload,
+      hilowSignature: signature,
+      message: 'Firma HMAC generada y pago simulado verificado con éxito'
+    });
+  } catch (error: any) {
+    return res.status(500).json({ error: error?.message || 'Error simulando pago' });
+  }
+});
+
+/**
+ * 3b. Diagnóstico Pre-Producción (solo Staff autenticado — nunca expone valores de secretos)
+ * GET /api/admin/production-readiness
+ */
+app.get('/api/admin/production-readiness', async (req, res) => {
+  try {
+    const idToken = extractBearerToken(req.headers.authorization);
+    if (!idToken) {
+      return res.status(401).json({
+        success: false,
+        message: 'Se requiere autenticación de Firebase (Authorization: Bearer).'
+      });
+    }
+
+    const verifiedUser = await verifyFirebaseIdToken(idToken);
+    if (!verifiedUser) {
+      return res.status(401).json({
+        success: false,
+        message: 'Sesión de Firebase inválida o expirada.'
+      });
+    }
+
+    const callerRole = await getCallerRoleServer(idToken, verifiedUser);
+    if (!callerRole.isStaff) {
+      return res.status(403).json({
+        success: false,
+        message: 'Acceso denegado: solo el equipo administrador o moderador puede consultar este diagnóstico.'
+      });
+    }
+
+    const forwardedProto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https')
+      .split(',')[0]
+      .trim();
+    const hostHeader = req.get('host');
+    const inferredOrigin = hostHeader ? `${forwardedProto}://${hostHeader}` : '';
+    const appUrl = String(process.env.APP_URL || inferredOrigin || '').replace(/\/+$/, '');
+
+    const [firebaseAdminHealthy, packlinkOrigin] = await Promise.all([
+      checkAdminFirestoreHealth(),
+      readPacklinkSettings(idToken)
+    ]);
+
+    const packlinkMissingFields = [
+      !packlinkOrigin.street ? 'Calle y número de recogida' : null,
+      !packlinkOrigin.city ? 'Ciudad' : null,
+      !packlinkOrigin.postalCode ? 'Código postal' : null,
+      !packlinkOrigin.phone ? 'Teléfono de recogida' : null
+    ].filter(Boolean) as string[];
+
+    return res.json({
+      success: true,
+      nodeEnv: process.env.NODE_ENV || 'development',
+      appUrl,
+      webhookUrl: appUrl ? `${appUrl}/api/webhooks/hilow` : '/api/webhooks/hilow',
+      checks: {
+        hilowApiKey: Boolean(process.env.HILOW_API_KEY?.trim()),
+        hilowWebhookSecret: Boolean(process.env.HILOW_WEBHOOK_SECRET?.trim()),
+        hilowRealtimeClient: Boolean(
+          process.env.VITE_HILOW_FIREBASE_API_KEY?.trim() &&
+            process.env.VITE_HILOW_FIREBASE_PROJECT_ID?.trim()
+        ),
+        firebaseAdminSdk: firebaseAdminHealthy,
+        packlinkApiKey: Boolean(process.env.PACKLINK_API_KEY?.trim()),
+        packlinkSenderComplete: packlinkMissingFields.length === 0,
+        mailjetConfigured: Boolean(
+          process.env.MAILJET_API_KEY?.trim() && process.env.MAILJET_SECRET_KEY?.trim()
+        ),
+        smtpConfigured: Boolean(
+          process.env.SMTP_HOST?.trim() &&
+            process.env.SMTP_USER?.trim() &&
+            process.env.SMTP_PASS?.trim()
+        ),
+        geminiAiConfigured: Boolean(process.env.GEMINI_API_KEY?.trim()),
+        appUrlConfigured: Boolean(appUrl && /^https?:\/\//i.test(appUrl))
+      },
+      packlinkOriginSummary: {
+        senderName: packlinkOrigin.senderName || '',
+        city: packlinkOrigin.city || '',
+        postalCode: packlinkOrigin.postalCode || '',
+        country: packlinkOrigin.country || 'ES',
+        missingFields: packlinkMissingFields
+      }
+    });
+  } catch (error: any) {
+    console.error('[Admin Readiness] Error:', error?.message || String(error));
+    return res.status(500).json({
+      success: false,
+      message: 'No se pudo completar el diagnóstico de producción.'
+    });
+  }
+});
+
+/**
+ * 3c. Estado en vivo de Packlink PRO y configuración logística (solo Staff)
+ * GET /api/admin/packlink/status
+ */
+app.get('/api/admin/packlink/status', async (req, res) => {
+  try {
+    const idToken = extractBearerToken(req.headers.authorization);
+    if (!idToken) {
+      return res.status(401).json({ success: false, error: 'Se requiere autenticación.' });
+    }
+    const verifiedUser = await verifyFirebaseIdToken(idToken);
+    if (!verifiedUser) {
+      return res.status(401).json({ success: false, error: 'Token inválido o expirado.' });
+    }
+    const callerRole = await getCallerRoleServer(idToken, verifiedUser);
+    if (!callerRole.isStaff) {
+      return res.status(403).json({ success: false, error: 'Solo el equipo staff puede consultar Packlink PRO.' });
+    }
+
+    const origin = await readPacklinkSettings(idToken);
+    const missingFields = [
+      !origin.senderName ? 'Nombre neutro en etiqueta' : null,
+      !origin.street ? 'Dirección de recogida' : null,
+      !origin.city ? 'Ciudad' : null,
+      !origin.postalCode ? 'Código postal de origen' : null,
+      !origin.phone ? 'Teléfono de recogida' : null
+    ].filter(Boolean) as string[];
+
+    return res.json({
+      success: true,
+      packlinkApiKeyConfigured: Boolean(process.env.PACKLINK_API_KEY?.trim()),
+      packlinkDashboardUrl: 'https://pro.packlink.com/',
+      origin,
+      missingFields
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      error: error?.message || 'Error consultando el estado de Packlink PRO.'
+    });
+  }
+});
+
+/**
+ * 3d. Simulador en vivo de tarifas Packlink PRO para el panel Envío (solo Staff)
+ * POST /api/admin/packlink/test-quotes
+ */
+app.post('/api/admin/packlink/test-quotes', async (req, res) => {
+  try {
+    const idToken = extractBearerToken(req.headers.authorization);
+    if (!idToken) {
+      return res.status(401).json({ success: false, error: 'Se requiere autenticación.' });
+    }
+    const verifiedUser = await verifyFirebaseIdToken(idToken);
+    if (!verifiedUser) {
+      return res.status(401).json({ success: false, error: 'Token inválido o expirado.' });
+    }
+    const callerRole = await getCallerRoleServer(idToken, verifiedUser);
+    if (!callerRole.isStaff) {
+      return res.status(403).json({ success: false, error: 'Solo el equipo staff puede probar tarifas Packlink PRO.' });
+    }
+
+    const { postalCode, country, maxOptionsOverride, ignoreCarrierFilter } = req.body || {};
+    const result = await getServerShippingQuotes({
+      postalCode: String(postalCode || '28001'),
+      country: String(country || 'ES'),
+      maxOptionsOverride: typeof maxOptionsOverride === 'number' ? maxOptionsOverride : undefined,
+      ignoreCarrierFilter: Boolean(ignoreCarrierFilter)
+    });
+
+    return res.json({
+      success: true,
+      countryCode: result.isoCountry,
+      quotes: result.quotes,
+      source: result.source,
+      originCountry: result.originCountry,
+      originPostalCode: result.originPostalCode,
+      totalPacklinkCandidates: result.totalPacklinkCandidates
+    });
+  } catch (error: any) {
+    return res.status(400).json({
+      success: false,
+      error: error?.message || 'No se pudieron obtener cotizaciones de prueba.'
+    });
+  }
+});
+
+/**
+ * 4. Endpoint de Servicio de Correos Transaccionales (Confirmación de Compra)
+ * Integrado con el patrón Firebase Cloud Functions
+ * POST /api/functions/send-order-email
+ */
+app.post('/api/functions/send-order-email', async (req, res) => {
+  try {
+    const idToken = extractBearerToken(req.headers.authorization);
+    if (!idToken) {
+      return res.status(401).json({
+        success: false,
+        error: 'Se requiere autenticación de Firebase (Authorization: Bearer).'
+      });
+    }
+
+    const verifiedUser = await verifyFirebaseIdToken(idToken);
+    if (!verifiedUser) {
+      return res.status(401).json({
+        success: false,
+        error: 'Token de Firebase inválido o expirado.'
+      });
+    }
+
+    const { orderId, logId, customerEmail, subject, htmlContent, senderName, replyToEmail } =
+      req.body || {};
+    if (!orderId || !customerEmail || !htmlContent) {
+      return res.status(400).json({ error: 'Faltan parámetros requeridos (orderId, customerEmail, htmlContent)' });
+    }
+
+    const cleanEmail = String(customerEmail).trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return res.status(400).json({ error: 'Correo electrónico de destino inválido.' });
+    }
+
+    const callerRole = await getCallerRoleServer(idToken, verifiedUser);
+    const accessCheck = await verifyOrderEmailAccessServer(
+      idToken,
+      callerRole,
+      String(orderId),
+      cleanEmail
+    );
+    if (!accessCheck.allowed) {
+      return res.status(403).json({
+        success: false,
+        error: accessCheck.reason || 'Permisos insuficientes para enviar este correo de pedido.'
+      });
+    }
+
+    const serverEmailConfig = await readServerEmailConfig().catch(() => DEFAULT_SITE_CONFIG.email);
+    const safeHtmlContent = String(htmlContent).replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
+    const defaultSubjectTpl =
+      serverEmailConfig.templates?.orders?.orderConfirmation?.subject ||
+      "Confirmación de tu pedido #{orderId} - Chloe's Secrets World";
+    const emailSubject = String(
+      subject || defaultSubjectTpl.replaceAll('{orderId}', String(orderId))
+    ).slice(0, 200);
+    const resolvedSenderName = String(senderName || serverEmailConfig.senderName || '').trim();
+    const resolvedReplyTo = String(replyToEmail || serverEmailConfig.replyToEmail || '').trim();
+    const cleanLogId = typeof logId === 'string' && /^[a-zA-Z0-9_-]{3,128}$/.test(logId) ? logId : null;
+
+    // 1. Envío inmediato por Mailjet si está configurado
+    if (process.env.MAILJET_API_KEY?.trim() && process.env.MAILJET_SECRET_KEY?.trim()) {
+      const mjRes = await sendMailjetEmail({
+        to: {
+          email: cleanEmail,
+          name: String(req.body?.customerName || 'Cliente VIP')
+        },
+        fromName: resolvedSenderName,
+        replyToEmail: resolvedReplyTo,
+        subject: emailSubject,
+        textPart: `Confirmación de tu pedido #${orderId} en ${resolvedSenderName || "Chloe's Secrets World"}.`,
+        htmlPart: safeHtmlContent
+      });
+
+      if (mjRes.success) {
+        if (cleanLogId) {
+          await runWithAdminFirestore(
+            (adminDb) =>
+              adminDb.collection('email_logs').doc(cleanLogId).set(
+                {
+                  status: 'sent',
+                  source: 'mailjet',
+                  updatedAt: new Date().toISOString()
+                },
+                { merge: true }
+              ),
+            'update-email-log-mailjet'
+          ).catch(() => undefined);
+        }
+        return res.json({
+          success: true,
+          mode: 'mailjet',
+          messageId: `mj_${orderId}_${Date.now()}`,
+          recipient: cleanEmail,
+          orderId
+        });
+      }
+
+      if (cleanLogId) {
+        await runWithAdminFirestore(
+          (adminDb) =>
+            adminDb.collection('email_logs').doc(cleanLogId).set(
+              {
+                status: 'error',
+                source: 'mailjet',
+                errorDetails: mjRes.error || 'Error al despachar con Mailjet',
+                updatedAt: new Date().toISOString()
+              },
+              { merge: true }
+            ),
+          'update-email-log-mailjet-error'
+        ).catch(() => undefined);
+      }
+
+      return res.status(502).json({
+        success: false,
+        mode: 'mailjet',
+        error: mjRes.error || 'Mailjet rechazó el envío del correo.'
+      });
+    }
+
+    const smtpConfig = buildSmtpTransportConfig(serverEmailConfig);
+
+    if (smtpConfig) {
+      const nodemailer = (await import('nodemailer')).default;
+      const transporter = nodemailer.createTransport({
+        host: smtpConfig.smtpHost,
+        port: smtpConfig.smtpPort,
+        secure: smtpConfig.smtpPort === 465,
+        auth: {
+          user: smtpConfig.smtpAccount,
+          pass: smtpConfig.smtpSecret
+        }
+      });
+
+      const info = await transporter.sendMail({
+        from: smtpConfig.fromHeader,
+        to: cleanEmail,
+        replyTo: resolvedReplyTo || undefined,
+        subject: emailSubject,
+        html: safeHtmlContent
+      });
+
+      if (cleanLogId) {
+        await runWithAdminFirestore(
+          (adminDb) =>
+            adminDb.collection('email_logs').doc(cleanLogId).set(
+              { status: 'sent', source: 'smtp', updatedAt: new Date().toISOString() },
+              { merge: true }
+            ),
+          'update-email-log-smtp'
+        ).catch(() => undefined);
+      }
+
+      console.log(`[Email Service] Correo real enviado vía SMTP a ${cleanEmail} (ID: ${info.messageId})`);
+      return res.json({
+        success: true,
+        mode: 'smtp',
+        messageId: info.messageId,
+        recipient: cleanEmail,
+        orderId
+      });
+    }
+
+    // Modo Sandbox / Cola si aún no se han configurado credenciales Mailjet o SMTP
+    console.log(`[Email Service - Cola pendiente] Correo para #${orderId} registrado para ${cleanEmail}.`);
+    return res.json({
+      success: true,
+      mode: 'sandbox',
+      messageId: `queue_${Date.now()}`,
+      orderId,
+      recipient: cleanEmail,
+      note: 'Mailjet no configurado: correo registrado en cola para revisión manual.'
+    });
+  } catch (err: any) {
+    console.error('[Email Service] Error enviando correo:', err);
+    return res.status(500).json({ error: err.message || 'Error en el servidor de correo' });
+  }
+});
+
+/**
+ * 4a. Estado en vivo del motor Mailjet v3.1 (solo staff)
+ * GET /api/emails/mailjet-status
+ */
+app.get('/api/emails/mailjet-status', async (req, res) => {
+  try {
+    const idToken = extractBearerToken(req.headers.authorization);
+    if (!idToken) {
+      return res.status(401).json({ success: false, error: 'Se requiere autenticación.' });
+    }
+    const verifiedUser = await verifyFirebaseIdToken(idToken);
+    if (!verifiedUser) {
+      return res.status(401).json({ success: false, error: 'Token inválido o expirado.' });
+    }
+    const callerRole = await getCallerRoleServer(idToken, verifiedUser);
+    if (!callerRole.isStaff) {
+      return res.status(403).json({ success: false, error: 'Solo el equipo staff puede consultar Mailjet.' });
+    }
+
+    const hasApiKey = Boolean(process.env.MAILJET_API_KEY?.trim());
+    const hasSecretKey = Boolean(process.env.MAILJET_SECRET_KEY?.trim());
+    const smtpConfigured = Boolean(
+      process.env.SMTP_HOST?.trim() && process.env.SMTP_USER?.trim() && process.env.SMTP_PASS?.trim()
+    );
+
+    return res.json({
+      success: true,
+      provider: hasApiKey && hasSecretKey ? 'mailjet' : smtpConfigured ? 'smtp' : 'unconfigured',
+      mailjetConfigured: hasApiKey && hasSecretKey,
+      hasApiKey,
+      hasSecretKey,
+      fromEmail: process.env.MAILJET_FROM_EMAIL?.trim() || 'pedidos@chloesecrets.com',
+      fromName: process.env.MAILJET_FROM_NAME?.trim() || "Chloe's Secrets World",
+      adminRecipients: getAdminNotificationEmails(),
+      smtpConfigured,
+      firebaseAdminAuthAvailable: Boolean(getAdminAuth())
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Error comprobando Mailjet.' });
+  }
+});
+
+const authEmailRateLimiter = new Map<string, { count: number; resetAt: number }>();
+
+function checkAuthEmailRateLimit(key: string, maxRequests = 6, windowMs = 10 * 60 * 1000): boolean {
+  const now = Date.now();
+  const entry = authEmailRateLimiter.get(key);
+  if (!entry || entry.resetAt <= now) {
+    authEmailRateLimiter.set(key, { count: 1, resetAt: now + windowMs });
+    return true;
+  }
+  if (entry.count >= maxRequests) return false;
+  entry.count += 1;
+  return true;
+}
+
+function resolveSafeContinueUrl(rawOrigin?: unknown): string {
+  const fallback = (
+    process.env.APP_BASE_URL ||
+    process.env.APP_URL ||
+    process.env.VITE_APP_URL ||
+    'https://chloesecrets.com'
+  )
+    .trim()
+    .replace(/\/$/, '');
+
+  if (typeof rawOrigin !== 'string' || !rawOrigin.trim()) return fallback;
+  try {
+    const parsed = new URL(rawOrigin.trim());
+    if (
+      parsed.protocol === 'https:' ||
+      (parsed.protocol === 'http:' && (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1'))
+    ) {
+      return parsed.origin;
+    }
+  } catch {
+    // Fallback to configured origin
+  }
+  return fallback;
+}
+
+/**
+ * 4a-ter. Correos transaccionales de Firebase Auth (verificación, bienvenida y cambio de contraseña) vía Mailjet
+ * POST /api/auth/dispatch-lifecycle-emails
+ */
+app.post('/api/auth/dispatch-lifecycle-emails', async (req, res) => {
+  try {
+    const idToken = extractBearerToken(req.headers.authorization);
+    if (!idToken) {
+      return res.status(401).json({ success: false, error: 'Se requiere autenticación.' });
+    }
+    const verifiedUser = await verifyFirebaseIdToken(idToken);
+    if (!verifiedUser || !verifiedUser.email) {
+      return res.status(401).json({ success: false, error: 'Token inválido o usuario sin correo.' });
+    }
+
+    const rateKey = `lifecycle:${verifiedUser.uid}`;
+    if (!checkAuthEmailRateLimit(rateKey, 8, 10 * 60 * 1000)) {
+      return res.status(429).json({
+        success: false,
+        error: 'Has solicitado varios envíos seguidos. Espera unos minutos e inténtalo de nuevo.'
+      });
+    }
+
+    const { sendVerification, sendWelcome, sendPasswordChanged, origin, recipientName } = req.body || {};
+    const mailjetConfigured = Boolean(
+      process.env.MAILJET_API_KEY?.trim() && process.env.MAILJET_SECRET_KEY?.trim()
+    );
+    const serverEmailConfig = await readServerEmailConfig().catch(() => DEFAULT_SITE_CONFIG.email);
+    const continueUrl = resolveSafeContinueUrl(origin);
+    const displayName = String(recipientName || verifiedUser.email.split('@')[0] || 'Miembro VIP').trim();
+
+    let verificationMode: 'mailjet' | 'fallback_client' | 'disabled' | 'already_verified' | 'skipped' = 'skipped';
+    let welcomeSent = false;
+    let passwordChangedSent = false;
+
+    if (sendVerification) {
+      if (verifiedUser.emailVerified) {
+        verificationMode = 'already_verified';
+      } else if (serverEmailConfig.templates?.auth?.verifyEmail?.enabled === false) {
+        verificationMode = 'disabled';
+      } else if (!mailjetConfigured) {
+        verificationMode = 'fallback_client';
+      } else {
+        const adminAuth = getAdminAuth();
+        if (!adminAuth) {
+          verificationMode = 'fallback_client';
+        } else {
+          try {
+            const verificationLink = await adminAuth.generateEmailVerificationLink(
+              verifiedUser.email,
+              { url: continueUrl }
+            );
+            const mjVerify = await sendAuthTransactionalEmail({
+              type: 'verifyEmail',
+              toEmail: verifiedUser.email,
+              recipientName: displayName,
+              actionUrl: verificationLink,
+              emailConfig: serverEmailConfig
+            });
+            verificationMode = mjVerify.success ? 'mailjet' : 'fallback_client';
+
+            if (mjVerify.success) {
+              const logId = `log_auth_verify_${verifiedUser.uid.slice(0, 12)}_${Date.now()}`;
+              await runWithAdminFirestore(
+                (adminDb) =>
+                  adminDb.collection('email_logs').doc(logId).set({
+                    id: logId,
+                    orderId: `AUTH_${verifiedUser.uid.slice(0, 10)}`,
+                    to: verifiedUser.email,
+                    recipientName: displayName,
+                    subject:
+                      serverEmailConfig.templates?.auth?.verifyEmail?.subject ||
+                      'Verificación de correo electrónico',
+                    status: 'sent',
+                    timestamp: new Date().toISOString(),
+                    source: 'mailjet_auth'
+                  }),
+                'log-auth-verify-email'
+              ).catch(() => undefined);
+            }
+          } catch (err) {
+            if (!isAdminCredentialError(err)) {
+              console.warn('[Auth Mailjet] No se pudo generar enlace de verificación:', err);
+            }
+            verificationMode = 'fallback_client';
+          }
+        }
+      }
+    }
+
+    if (sendWelcome && mailjetConfigured && serverEmailConfig.templates?.auth?.welcome?.enabled !== false) {
+      const mjWelcome = await sendAuthTransactionalEmail({
+        type: 'welcome',
+        toEmail: verifiedUser.email,
+        recipientName: displayName,
+        actionUrl: continueUrl,
+        emailConfig: serverEmailConfig
+      });
+      welcomeSent = mjWelcome.success;
+      if (mjWelcome.success) {
+        const logId = `log_auth_welcome_${verifiedUser.uid.slice(0, 12)}_${Date.now()}`;
+        await runWithAdminFirestore(
+          (adminDb) =>
+            adminDb.collection('email_logs').doc(logId).set({
+              id: logId,
+              orderId: `WELCOME_${verifiedUser.uid.slice(0, 10)}`,
+              to: verifiedUser.email,
+              recipientName: displayName,
+              subject:
+                serverEmailConfig.templates?.auth?.welcome?.subject ||
+                "Bienvenida al Club Privado de Chloe's Secrets",
+              status: 'sent',
+              timestamp: new Date().toISOString(),
+              source: 'mailjet_auth'
+            }),
+          'log-auth-welcome-email'
+        ).catch(() => undefined);
+      }
+    }
+
+    if (
+      sendPasswordChanged &&
+      mailjetConfigured &&
+      serverEmailConfig.templates?.auth?.passwordChanged?.enabled !== false
+    ) {
+      const mjPwd = await sendAuthTransactionalEmail({
+        type: 'passwordChanged',
+        toEmail: verifiedUser.email,
+        recipientName: displayName,
+        actionUrl: continueUrl,
+        emailConfig: serverEmailConfig
+      });
+      passwordChangedSent = mjPwd.success;
+    }
+
+    return res.json({
+      success: true,
+      verificationMode,
+      fallbackVerificationToClient: verificationMode === 'fallback_client',
+      welcomeSent,
+      passwordChangedSent
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      fallbackVerificationToClient: true,
+      error: err?.message || 'Error despachando correos de cuenta.'
+    });
+  }
+});
+
+/**
+ * 4a-quater. Recuperación de contraseña con plantilla de lujo vía Mailjet + Action Link oficial de Firebase
+ * POST /api/auth/send-password-reset
+ */
+app.post('/api/auth/send-password-reset', async (req, res) => {
+  try {
+    const cleanEmail = String(req.body?.email || '').trim().toLowerCase();
+    if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return res.status(400).json({ success: false, error: 'Introduce un correo electrónico válido.' });
+    }
+
+    const clientIp = req.ip || 'unknown';
+    if (
+      !checkAuthEmailRateLimit(`reset:ip:${clientIp}`, 10, 15 * 60 * 1000) ||
+      !checkAuthEmailRateLimit(`reset:email:${cleanEmail}`, 5, 15 * 60 * 1000)
+    ) {
+      return res.status(429).json({
+        success: false,
+        error: 'Demasiadas solicitudes de recuperación. Espera unos minutos e inténtalo de nuevo.'
+      });
+    }
+
+    const serverEmailConfig = await readServerEmailConfig().catch(() => DEFAULT_SITE_CONFIG.email);
+    if (serverEmailConfig.templates?.auth?.resetPassword?.enabled === false) {
+      return res.json({ success: true, mode: 'disabled' });
+    }
+
+    const mailjetConfigured = Boolean(
+      process.env.MAILJET_API_KEY?.trim() && process.env.MAILJET_SECRET_KEY?.trim()
+    );
+    const adminAuth = getAdminAuth();
+    if (!mailjetConfigured || !adminAuth) {
+      return res.json({ success: false, fallbackToClient: true });
+    }
+
+    const continueUrl = resolveSafeContinueUrl(req.body?.origin);
+    let resetLink: string;
+    let displayName: string | undefined;
+
+    try {
+      const userRecord = await adminAuth.getUserByEmail(cleanEmail);
+      displayName = userRecord.displayName || undefined;
+      resetLink = await adminAuth.generatePasswordResetLink(cleanEmail, { url: continueUrl });
+    } catch (err: any) {
+      const code = String(err?.code || '');
+      if (code === 'auth/user-not-found') {
+        // Evitar enumeración de cuentas: devolver respuesta neutra exitosa sin enviar correo
+        return res.json({ success: true, mode: 'ignored' });
+      }
+      if (isAdminCredentialError(err)) {
+        return res.json({ success: false, fallbackToClient: true });
+      }
+      console.warn('[Auth Mailjet] Error generando enlace resetPassword:', err);
+      return res.json({ success: false, fallbackToClient: true });
+    }
+
+    const mjRes = await sendAuthTransactionalEmail({
+      type: 'resetPassword',
+      toEmail: cleanEmail,
+      recipientName: displayName,
+      actionUrl: resetLink,
+      emailConfig: serverEmailConfig
+    });
+
+    if (!mjRes.success) {
+      return res.json({ success: false, fallbackToClient: true });
+    }
+
+    const logId = `log_auth_reset_${Date.now()}`;
+    await runWithAdminFirestore(
+      (adminDb) =>
+        adminDb.collection('email_logs').doc(logId).set({
+          id: logId,
+          orderId: 'AUTH_RESET',
+          to: cleanEmail,
+          recipientName: displayName || cleanEmail.split('@')[0],
+          subject:
+            serverEmailConfig.templates?.auth?.resetPassword?.subject ||
+            'Restablecer tu contraseña',
+          status: 'sent',
+          timestamp: new Date().toISOString(),
+          source: 'mailjet_auth'
+        }),
+      'log-auth-reset-email'
+    ).catch(() => undefined);
+
+    return res.json({ success: true, mode: 'mailjet' });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      fallbackToClient: true,
+      error: err?.message || 'Error enviando correo de recuperación.'
+    });
+  }
+});
+
+/**
+ * 4a-bis. Enviar email de prueba real con Mailjet desde el diseñador de plantillas (solo staff)
+ * POST /api/emails/send-test
+ */
+app.post('/api/emails/send-test', async (req, res) => {
+  try {
+    const idToken = extractBearerToken(req.headers.authorization);
+    if (!idToken) {
+      return res.status(401).json({ success: false, error: 'Se requiere autenticación.' });
+    }
+    const verifiedUser = await verifyFirebaseIdToken(idToken);
+    if (!verifiedUser) {
+      return res.status(401).json({ success: false, error: 'Token inválido o expirado.' });
+    }
+    const callerRole = await getCallerRoleServer(idToken, verifiedUser);
+    if (!callerRole.isStaff) {
+      return res.status(403).json({ success: false, error: 'Solo el equipo administrador puede enviar pruebas.' });
+    }
+
+    const { toEmail, subject, htmlContent, senderName, replyToEmail } = req.body || {};
+    const cleanTo = String(toEmail || verifiedUser.email || '').trim();
+    if (!cleanTo || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanTo)) {
+      return res.status(400).json({ success: false, error: 'Introduce un correo de destino válido.' });
+    }
+    if (!htmlContent) {
+      return res.status(400).json({ success: false, error: 'Falta el contenido HTML de la plantilla.' });
+    }
+    if (!process.env.MAILJET_API_KEY?.trim() || !process.env.MAILJET_SECRET_KEY?.trim()) {
+      return res.status(503).json({
+        success: false,
+        error: 'Faltan MAILJET_API_KEY y/o MAILJET_SECRET_KEY en las variables de entorno.'
+      });
+    }
+
+    const safeHtml = String(htmlContent).replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
+    const cleanSubject = `[PRUEBA] ${String(subject || "Plantilla Transaccional · Chloe's Secrets World").slice(0, 180)}`;
+
+    const mjRes = await sendMailjetEmail({
+      to: { email: cleanTo, name: cleanTo.split('@')[0] },
+      fromName: String(senderName || '').trim() || undefined,
+      replyToEmail: String(replyToEmail || '').trim() || undefined,
+      subject: cleanSubject,
+      textPart: `Prueba de plantilla transaccional enviada desde el Diseñador Mailjet (${cleanSubject}).`,
+      htmlPart: safeHtml
+    });
+
+    if (!mjRes.success) {
+      return res.status(502).json({
+        success: false,
+        error: mjRes.error || 'Mailjet no aceptó el envío de prueba.'
+      });
+    }
+
+    return res.json({
+      success: true,
+      recipient: cleanTo,
+      message: `Email de prueba real enviado vía Mailjet a ${cleanTo}.`
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Error enviando prueba Mailjet.' });
+  }
+});
+
+/**
+ * 4b. Descargar PDF de etiqueta Packlink o Hoja de Envío Discreto de una orden (solo staff)
+ * GET /api/orders/:orderId/shipping-pdf?type=auto|slip|packlink&download=1
+ */
+app.get('/api/orders/:orderId/shipping-pdf', async (req, res) => {
+  try {
+    const idToken = extractBearerToken(req.headers.authorization);
+    if (!idToken) {
+      return res.status(401).json({ error: 'Se requiere autenticación de Firebase (Authorization: Bearer).' });
+    }
+
+    const verifiedUser = await verifyFirebaseIdToken(idToken);
+    if (!verifiedUser) {
+      return res.status(401).json({ error: 'Token de Firebase inválido o expirado.' });
+    }
+
+    const callerRole = await getCallerRoleServer(idToken, verifiedUser);
+    if (!callerRole.isStaff) {
+      return res.status(403).json({ error: 'Solo el equipo administrador puede descargar documentos de envío.' });
+    }
+
+    const orderId = String(req.params.orderId || '').trim();
+    const resolved = await readOrderServer(orderId, idToken);
+    if (!resolved) {
+      return res.status(404).json({ error: 'Pedido no encontrado.' });
+    }
+
+    const requestedType = String(req.query.type || 'auto').toLowerCase();
+    const disposition = String(req.query.download || '') === '1' ? 'attachment' : 'inline';
+    const order = resolved.order;
+    const plRef = order?.packlink?.reference ? String(order.packlink.reference).trim() : '';
+    const labelUrl = order?.packlink?.labelUrl ? String(order.packlink.labelUrl).trim() : null;
+
+    if ((requestedType === 'packlink' || requestedType === 'auto') && (labelUrl || plRef)) {
+      const resolvedLabel = await fetchPacklinkLabelDirectOrUrl(plRef, labelUrl);
+      if (resolvedLabel?.buffer) {
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `${disposition}; filename="Etiqueta-Packlink-${orderId}.pdf"`);
+        return res.send(resolvedLabel.buffer);
+      }
+      if (requestedType === 'packlink') {
+        const errorMsg = plRef
+          ? `La etiqueta oficial del envío ${plRef} aún no está emitida en Packlink PRO. Confirma/paga el borrador en pro.packlink.com y vuelve a pulsar Sync.`
+          : 'Este pedido aún no tiene una referencia creada en Packlink PRO. Asígnalo y pulsa Sync en Admin → Envío.';
+        return res.status(404).json({ error: errorMsg });
+      }
+    }
+
+    const origin = await readPacklinkSettings(idToken);
+    const slipPdf = await generateOrderShippingPdfBuffer(order, origin);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `${disposition}; filename="Hoja-Envio-Discreto-${orderId}.pdf"`);
+    return res.send(slipPdf);
+  } catch (err: any) {
+    console.error('[ShippingPDF] Error generando PDF de envío:', err);
+    return res.status(500).json({ error: err?.message || 'No se pudo generar el PDF de envío.' });
+  }
+});
+
+/**
+ * 4c. Sincronizar / asignar servicio / generar borrador y etiqueta oficial en Packlink PRO (solo staff)
+ * POST /api/orders/:orderId/packlink/sync
+ */
+app.post('/api/orders/:orderId/packlink/sync', async (req, res) => {
+  try {
+    const idToken = extractBearerToken(req.headers.authorization);
+    if (!idToken) {
+      return res.status(401).json({ success: false, error: 'Se requiere autenticación de Firebase.' });
+    }
+
+    const verifiedUser = await verifyFirebaseIdToken(idToken);
+    if (!verifiedUser) {
+      return res.status(401).json({ success: false, error: 'Token de Firebase inválido o expirado.' });
+    }
+
+    const callerRole = await getCallerRoleServer(idToken, verifiedUser);
+    if (!callerRole.isStaff) {
+      return res.status(403).json({ success: false, error: 'Solo el equipo administrador puede gestionar etiquetas Packlink.' });
+    }
+
+    const orderId = String(req.params.orderId || '').trim();
+    const resolved = await readOrderServer(orderId, idToken);
+    if (!resolved) {
+      return res.status(404).json({ success: false, error: 'Pedido no encontrado.' });
+    }
+
+    const { serviceId, serviceName, carrierName, quotedPrice, autoSelectPacklink } = req.body || {};
+    const serviceOverride =
+      typeof serviceId === 'string' && serviceId.trim()
+        ? {
+            serviceId: serviceId.trim(),
+            serviceName: typeof serviceName === 'string' ? serviceName.trim() : undefined,
+            carrierName: typeof carrierName === 'string' ? carrierName.trim() : undefined,
+            quotedPrice: typeof quotedPrice === 'number' ? quotedPrice : undefined
+          }
+        : undefined;
+
+    const packlink = await syncOrderPacklinkShipment(resolved.order, {
+      docPath: resolved.docPath,
+      idToken,
+      forceRefresh: true,
+      autoSelectPacklink: Boolean(autoSelectPacklink),
+      serviceOverride
+    });
+
+    return res.json({
+      success: true,
+      orderId,
+      packlink
+    });
+  } catch (err: any) {
+    console.error('[PacklinkSync] Error sincronizando envío:', err);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'No se pudo sincronizar el envío con Packlink.'
+    });
+  }
+});
+
+/**
+ * 4b. Endpoint de envío de invitación privada para Creadoras / Actrices
+ * POST /api/creator-invitations/send
+ * Protegido: requiere token Firebase válido y rol staff (admin o moderator).
+ */
+app.post('/api/creator-invitations/send', async (req, res) => {
+  try {
+    const idToken = extractBearerToken(req.headers.authorization);
+    if (!idToken) {
+      return res.status(401).json({
+        success: false,
+        sent: false,
+        message: 'Se requiere autenticación de Firebase (Authorization: Bearer).'
+      });
+    }
+
+    const verifiedUser = await verifyFirebaseIdToken(idToken);
+    if (!verifiedUser) {
+      return res.status(401).json({
+        success: false,
+        sent: false,
+        message: 'Token de Firebase inválido o expirado.'
+      });
+    }
+
+    const callerRole = await getCallerRoleServer(idToken, verifiedUser);
+    if (!callerRole.isStaff) {
+      return res.status(403).json({
+        success: false,
+        sent: false,
+        message: 'Acceso denegado: solo el equipo administrador o moderador puede enviar invitaciones.'
+      });
+    }
+
+    const {
+      invitedEmail,
+      modelName,
+      inviteUrl,
+      creatorCommissionPercent = 20,
+      wearTeamCommissionPercent,
+      webmasterCommissionPercent,
+      compensationPhase = 'variable_20_20_60'
+    } = req.body || {};
+
+    const cleanEmail = String(invitedEmail || '').trim().toLowerCase();
+    const cleanModel = String(modelName || '').trim().slice(0, 100);
+    const cleanUrl = String(inviteUrl || '').trim();
+
+    if (!cleanEmail || !cleanEmail.includes('@') || !cleanModel || !/^https?:\/\//i.test(cleanUrl)) {
+      return res.status(400).json({
+        success: false,
+        sent: false,
+        message: 'Parámetros de invitación inválidos.'
+      });
+    }
+
+    if (process.env.MAILJET_API_KEY && process.env.MAILJET_SECRET_KEY) {
+      const serverEmailConfig = await readServerEmailConfig().catch(() => DEFAULT_SITE_CONFIG.email);
+      const mjRes = await sendCreatorInvitationEmail({
+        invitedEmail: cleanEmail,
+        modelName: cleanModel,
+        inviteUrl: cleanUrl,
+        creatorCommissionPercent: Number(creatorCommissionPercent) || 20,
+        wearTeamCommissionPercent:
+          typeof wearTeamCommissionPercent === 'number' ? wearTeamCommissionPercent : undefined,
+        webmasterCommissionPercent:
+          typeof webmasterCommissionPercent === 'number' ? webmasterCommissionPercent : undefined,
+        compensationPhase: String(compensationPhase || 'variable_20_20_60'),
+        emailConfig: serverEmailConfig
+      });
+      return res.json({
+        success: true,
+        sent: mjRes.success,
+        simulated: mjRes.simulated,
+        inviteUrl: cleanUrl,
+        message: mjRes.success
+          ? `Invitación enviada por email a ${cleanEmail}.`
+          : mjRes.error || 'Enlace generado listo para copiar.'
+      });
+    }
+
+    console.log(`[Creator Invite Sandbox] Enlace generado para ${cleanModel} (${cleanEmail}): ${cleanUrl}`);
+    return res.json({
+      success: true,
+      sent: false,
+      simulated: true,
+      inviteUrl: cleanUrl,
+      message: 'Invitación registrada en Firestore. Copia el enlace seguro para enviárselo a la creadora.'
+    });
+  } catch (err: any) {
+    console.error('[Creator Invite] Error:', err);
+    return res.status(500).json({
+      success: false,
+      sent: false,
+      message: err?.message || 'Error procesando invitación de creadora.'
+    });
+  }
+});
+
+/**
+ * 5. Endpoint de Cálculo de Tarifas de Envío Packlink PRO (Mensajería Discreta)
+ * POST /api/shipping/quotes
+ */
+app.post('/api/shipping/quotes', async (req, res) => {
+  try {
+    const { postalCode, country } = req.body || {};
+    const result = await getServerShippingQuotes({
+      postalCode: String(postalCode || ''),
+      country: String(country || '')
+    });
+
+    return res.json({
+      success: true,
+      countryCode: result.isoCountry,
+      quotes: result.quotes,
+      source: result.source,
+      originCountry: result.originCountry,
+      originPostalCode: result.originPostalCode,
+      totalPacklinkCandidates: result.totalPacklinkCandidates
+    });
+  } catch (err: any) {
+    const msg = err?.message || 'No se pudo calcular la tarifa de envío para este destino.';
+    const isValidation =
+      msg.includes('código postal') || msg.includes('país') || msg.includes('5 dígitos');
+    return res.status(isValidation ? 400 : 500).json({
+      success: false,
+      message: msg
+    });
+  }
+});
+
+/**
+ * 6. Endpoints de Localización, Divisa en Vivo (BCE/Frankfurter) y Traducción IA (@google/genai)
+ */
+app.get('/api/i18n/rates', async (_req, res) => {
+  try {
+    const data = await getLiveExchangeRates();
+    return res.json({ success: true, ...data });
+  } catch (err: any) {
+    return res.status(502).json({
+      success: false,
+      error: err?.message || 'No se pudieron obtener los tipos de cambio en vivo.'
+    });
+  }
+});
+
+app.get('/api/i18n/detect', async (req, res) => {
+  try {
+    const askPrompt = req.query.ask === '1' || req.query.ask === 'true';
+    const simulateCountry =
+      typeof req.query.simulateCountry === 'string' ? req.query.simulateCountry : undefined;
+    const result = await detectVisitorLocalization(req, { askPrompt, simulateCountry });
+    return res.json({ success: true, ...result });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'No se pudo detectar la región del visitante.'
+    });
+  }
+});
+
+app.post('/api/i18n/translate', async (req, res) => {
+  try {
+    const targetLang = String(req.body?.targetLang || 'ES').toUpperCase() as SupportedLanguageCode;
+    const rawItems = Array.isArray(req.body?.items) ? req.body.items : [];
+
+    if (!['ES', 'EN', 'FR', 'DE', 'IT', 'PT'].includes(targetLang)) {
+      return res.status(400).json({ success: false, error: 'Idioma de destino no válido.' });
+    }
+
+    if (rawItems.length === 0) {
+      return res.json({
+        success: true,
+        targetLang,
+        translations: {},
+        translatedByText: {},
+        fromCacheCount: 0,
+        fromAiCount: 0
+      });
+    }
+
+    const sanitizedItems = rawItems
+      .slice(0, 80)
+      .map((item: any, idx: number) => ({
+        key: String(item?.key || `k_${idx}`).slice(0, 120),
+        text: String(item?.text || '').slice(0, 1200)
+      }));
+
+    const result = await translateBatchWithGemini(targetLang, sanitizedItems);
+    return res.json({
+      success: true,
+      targetLang,
+      ...result
+    });
+  } catch (err: any) {
+    const msg = err?.message || 'Error al traducir con Gemini.';
+    const status = msg.includes('GEMINI_API_KEY') ? 503 : 502;
+    console.error('[i18n/translate] Error:', msg);
+    return res.status(status).json({
+      success: false,
+      error: msg
+    });
+  }
+});
+
+app.post('/api/i18n/resolve-preference', async (req, res) => {
+  try {
+    const queryText = String(req.body?.query || '').trim();
+    const currentLanguage = String(req.body?.currentLanguage || 'ES').toUpperCase() as SupportedLanguageCode;
+    const currentCurrency = String(req.body?.currentCurrency || 'EUR').toUpperCase() as SupportedCurrencyCode;
+
+    if (!queryText) {
+      return res.status(400).json({ success: false, error: 'Escribe tu preferencia de idioma o divisa.' });
+    }
+
+    const resolved = await resolvePreferenceWithGemini(
+      queryText.slice(0, 400),
+      currentLanguage,
+      currentCurrency
+    );
+    return res.json({ success: true, ...resolved });
+  } catch (err: any) {
+    const msg = err?.message || 'No se pudo procesar tu preferencia con Gemini.';
+    const status = msg.includes('GEMINI_API_KEY') ? 503 : 502;
+    console.error('[i18n/resolve-preference] Error:', msg);
+    return res.status(status).json({
+      success: false,
+      error: msg
+    });
+  }
+});
+
+// Cabecera HTTP noindex para rutas privadas de checkout, suscripción y retornos
+app.use(['/checkout', '/subscription', '/account/subscription'], (_req, res, next) => {
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  next();
+});
+
+app.get('/api/health', (_req, res) => {
+  res.status(200).json({ ok: true, status: 'healthy' });
+});
+
+app.use('/api', (_req, res) => {
+  res.status(404).json({ success: false, message: 'Ruta de API no encontrada.' });
+});
+
+// Configuración de Vite para desarrollo y servicio de estáticos en producción
+async function startServer() {
+  if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa'
+    });
+    app.use(vite.middlewares);
+  } else {
+    app.use(express.static(path.resolve(__dirname, 'dist')));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+    });
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[Chloe's Secrets] Servidor full-stack iniciado en http://0.0.0.0:${PORT}`);
+  });
+}
+
+startServer();

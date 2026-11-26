@@ -885,7 +885,7 @@ async function VideoDetailPage({ slug }: { slug: string }) {
                     downloadAvailableAt={downloadAvailability.availableAt?.toISOString() ?? null}
                     downloadBlockReason={downloadAvailability.reason}
                     favoriteCount={video._count.favorites}
-                    viewCount={(video.viewCount + 1).toLocaleString()}
+                    viewCount={(video.viewCount + 1).toLocaleString("en-US")}
                   />
                 </div>
               </div>
@@ -920,7 +920,7 @@ async function VideoDetailPage({ slug }: { slug: string }) {
                 {video.releaseDate && (
                   <div className="flex items-center gap-2">
                     <span className="font-medium" style={{ color: "var(--text-primary)" }}>Fecha:</span>
-                    <span>{new Date(video.releaseDate).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}</span>
+                    <span>{new Date(video.releaseDate).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", timeZone: "UTC" })}</span>
                   </div>
                 )}
                 {video.duration != null && video.duration > 0 && (

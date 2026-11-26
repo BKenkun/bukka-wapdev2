@@ -209,6 +209,7 @@ export function LoginModal({ open, onOpenChange, defaultView = "login", callback
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
+        aria-describedby={undefined}
         className="sm:max-w-[400px] p-0 gap-0 rounded-none"
         style={{ backgroundColor: "var(--global-bg)", borderColor: "var(--border-color)" }}
       >

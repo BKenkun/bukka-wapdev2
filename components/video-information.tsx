@@ -72,7 +72,8 @@ export function VideoInformation({ description, performers, tags, director, rele
               {new Date(releaseDate).toLocaleDateString('en-US', {
                 year: 'numeric',
                 month: 'long',
-                day: 'numeric'
+                day: 'numeric',
+                timeZone: 'UTC',
               })}
             </span>
           </div>

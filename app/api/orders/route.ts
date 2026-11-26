@@ -6,6 +6,7 @@ import { sendTemplateEmail, OrderConfirmationTemplate } from "@/lib/email"
 import { clearCartSessionCookie, getCartSessionId } from "@/lib/cart-session"
 import { createAdminNotification } from "@/lib/admin-notifications"
 import { validateReferralCode } from "@/lib/referral-codes"
+import { getPaymentProcessorSettings } from "@/lib/payment-settings"
 
 // GET - Listar órdenes del usuario
 export async function GET(request: NextRequest) {
@@ -290,6 +291,11 @@ export async function POST(request: NextRequest) {
     // Generate order number
     const orderNumber = `ORD-${Date.now()}-${Math.random().toString(36).substring(2, 7).toUpperCase()}`
 
+    const resolvedPaymentGateway =
+      !paymentGateway || paymentGateway === "card"
+        ? (await getPaymentProcessorSettings()).shopProcessor
+        : paymentGateway
+
     // Create order in transaction
     const order = await prisma.$transaction(async (tx) => {
       // Create order
@@ -309,7 +315,7 @@ export async function POST(request: NextRequest) {
           shippingAddress: shippingAddress as object,
           billingAddress: (sameAsBilling ? shippingAddress : billingAddress) as object,
           shippingMethod: shippingMethod || null,
-          paymentGateway: paymentGateway || null,
+          paymentGateway: resolvedPaymentGateway || null,
           referralCodeId,
           OrderItem: {
             create: cart.items.map((item) => {

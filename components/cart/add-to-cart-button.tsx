@@ -29,6 +29,7 @@ export function AddToCartButton({
       const res = await fetch("/api/cart", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ productId, quantity }),
       })
 

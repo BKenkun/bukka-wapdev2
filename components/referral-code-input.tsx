@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
+import { safeParseJson } from "@/lib/safe-json"
 
 export type ReferralOwner =
   | {
@@ -69,18 +70,27 @@ export function ReferralCodeInput({
       const res = await fetch("/api/referral-codes/validate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ code, context, amount }),
       })
-      const data = await res.json()
-      if (!res.ok || !data.valid) {
-        if (!silent) setError(data.error || "Invalid code")
+      const data = await safeParseJson<{
+        valid?: boolean
+        code?: string
+        discountPercent?: number
+        discountAmount?: number
+        label?: string | null
+        owner?: ReferralOwner
+        error?: string
+      }>(res)
+      if (!res.ok || !data?.valid || !data.code || !data.owner) {
+        if (!silent) setError(data?.error || "Invalid code")
         return
       }
       onApply({
         code: data.code,
         discountPercent: Number(data.discountPercent),
         discountAmount: Number(data.discountAmount),
-        label: data.label,
+        label: data.label ?? null,
         owner: data.owner,
       })
       if (!silent) {

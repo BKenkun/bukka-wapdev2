@@ -2,6 +2,7 @@
 
 import * as React from "react"
 import { cn } from "@/lib/utils"
+import { safeParseJson } from "@/lib/safe-json"
 
 interface ShippingRate {
   id: string
@@ -60,6 +61,7 @@ export function ShippingCalculator({
       const res = await fetch("/api/shipping/calculate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({
           postalCode,
           country,
@@ -67,26 +69,30 @@ export function ShippingCalculator({
         }),
       })
 
-      const data = await res.json()
+      const data = await safeParseJson<{
+        rates?: ShippingRate[]
+        freeShippingInfo?: FreeShippingInfo | null
+        message?: string
+        error?: string
+      }>(res)
 
-      if (res.ok) {
+      if (res.ok && data) {
         setRates(data.rates || [])
         setFreeShippingInfo(data.freeShippingInfo || null)
         setHasCalculated(true)
 
         // Auto-select first available rate if none selected
-        if (data.rates?.length > 0 && !selectedRateId) {
+        if (data.rates && data.rates.length > 0 && !selectedRateId) {
           const firstAvailable = data.rates.find((r: ShippingRate) => r.isAvailable)
           if (firstAvailable) {
             onShippingRateSelect(firstAvailable)
           }
         }
       } else {
-        setError(data.message || data.error || "Error calculating shipping")
+        setError(data?.message || data?.error || "Error calculating shipping")
         setRates([])
       }
-    } catch (err) {
-      console.error("Error calculating shipping:", err)
+    } catch {
       setError("Error calculating shipping")
       setRates([])
     } finally {
@@ -163,56 +169,68 @@ export function ShippingCalculator({
           <label className="block text-sm font-medium" style={{ color: "var(--form-label-color)" }}>
             Shipping method
           </label>
-          {rates.map((rate) => (
-            <label
-              key={rate.id}
-              className={cn(
-                "flex items-center justify-between p-4 cursor-pointer transition-colors",
-                !rate.isAvailable && "opacity-50 cursor-not-allowed"
-              )}
-              style={selectedRateId === rate.id
-                ? { border: "1px solid var(--brand-color)", backgroundColor: "color-mix(in srgb, var(--brand-color) 10%, transparent)" }
-                : { border: "1px solid var(--border-color)", backgroundColor: "var(--surface-bg)" }
-              }
-            >
-              <div className="flex items-center gap-3">
-                <input
-                  type="radio"
-                  name="shippingRate"
-                  checked={selectedRateId === rate.id}
-                  onChange={() => rate.isAvailable && onShippingRateSelect(rate)}
-                  disabled={!rate.isAvailable}
-                  className="w-4 h-4"
-                  style={{ accentColor: "var(--brand-color)" }}
-                />
-                <div>
-                  <p className="font-medium" style={{ color: "var(--text-primary)" }}>{rate.name}</p>
-                  {rate.description && (
-                    <p className="text-sm" style={{ color: "var(--form-label-color)" }}>{rate.description}</p>
-                  )}
-                  {rate.estimatedDays && (
-                    <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-                      Delivery in {rate.estimatedDays} {rate.estimatedDays === 1 ? "day" : "days"}
-                    </p>
+          {rates.map((rate) => {
+            const radioId = `shipping-rate-${rate.id}`
+            return (
+              <div
+                key={rate.id}
+                onClick={() => rate.isAvailable && onShippingRateSelect(rate)}
+                className={cn(
+                  "flex items-center justify-between p-4 cursor-pointer transition-colors",
+                  !rate.isAvailable && "opacity-50 cursor-not-allowed"
+                )}
+                style={selectedRateId === rate.id
+                  ? { border: "1px solid var(--brand-color)", backgroundColor: "color-mix(in srgb, var(--brand-color) 10%, transparent)" }
+                  : { border: "1px solid var(--border-color)", backgroundColor: "var(--surface-bg)" }
+                }
+              >
+                <div className="flex items-center gap-3">
+                  <input
+                    id={radioId}
+                    type="radio"
+                    name="shippingRate"
+                    checked={selectedRateId === rate.id}
+                    onChange={() => rate.isAvailable && onShippingRateSelect(rate)}
+                    disabled={!rate.isAvailable}
+                    className="w-4 h-4"
+                    style={{ accentColor: "var(--brand-color)" }}
+                  />
+                  <div>
+                    <label
+                      htmlFor={radioId}
+                      onClick={(e) => e.stopPropagation()}
+                      className="block font-medium cursor-pointer"
+                      style={{ color: "var(--text-primary)" }}
+                    >
+                      {rate.name}
+                    </label>
+                    {rate.description && (
+                      <p className="text-sm" style={{ color: "var(--form-label-color)" }}>{rate.description}</p>
+                    )}
+                    {rate.estimatedDays && (
+                      <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+                        Delivery in {rate.estimatedDays} {rate.estimatedDays === 1 ? "day" : "days"}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                <div className="text-right">
+                  {rate.isFree ? (
+                    <div>
+                      {rate.originalPrice > 0 && (
+                        <span className="line-through text-sm mr-2" style={{ color: "var(--text-muted)" }}>
+                          {rate.originalPrice.toFixed(2)} €
+                        </span>
+                      )}
+                      <span className="font-bold" style={{ color: "var(--success-color)" }}>FREE</span>
+                    </div>
+                  ) : (
+                    <span className="font-bold" style={{ color: "var(--text-primary)" }}>{rate.price.toFixed(2)} €</span>
                   )}
                 </div>
               </div>
-              <div className="text-right">
-                {rate.isFree ? (
-                  <div>
-                    {rate.originalPrice > 0 && (
-                      <span className="line-through text-sm mr-2" style={{ color: "var(--text-muted)" }}>
-                        {rate.originalPrice.toFixed(2)} €
-                      </span>
-                    )}
-                    <span className="font-bold" style={{ color: "var(--success-color)" }}>FREE</span>
-                  </div>
-                ) : (
-                  <span className="font-bold" style={{ color: "var(--text-primary)" }}>{rate.price.toFixed(2)} €</span>
-                )}
-              </div>
-            </label>
-          ))}
+            )
+          })}
         </div>
       )}
 

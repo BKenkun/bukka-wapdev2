@@ -7,6 +7,12 @@ import {
   getCartSessionId,
 } from "@/lib/cart-session"
 
+export const dynamic = "force-dynamic"
+
+const NO_STORE_HEADERS = {
+  "Cache-Control": "no-store, no-cache, must-revalidate",
+}
+
 type CartOwner =
   | { userId: string; sessionId: null }
   | { userId: null; sessionId: string }
@@ -44,17 +50,20 @@ export async function GET() {
   try {
     const owner = await resolveCartOwner(false)
     if (!owner) {
-      return NextResponse.json({
-        cart: {
-          id: null,
-          items: [],
-          itemCount: 0,
-          subtotal: 0,
-          discount: 0,
-          discountPercent: 0,
-          total: 0,
+      return NextResponse.json(
+        {
+          cart: {
+            id: null,
+            items: [],
+            itemCount: 0,
+            subtotal: 0,
+            discount: 0,
+            discountPercent: 0,
+            total: 0,
+          },
         },
-      })
+        { headers: NO_STORE_HEADERS }
+      )
     }
 
     const cart = await prisma.cart.findUnique({
@@ -104,17 +113,20 @@ export async function GET() {
     })
 
     if (!cart) {
-      return NextResponse.json({
-        cart: {
-          id: null,
-          items: [],
-          itemCount: 0,
-          subtotal: 0,
-          discount: 0,
-          discountPercent: 0,
-          total: 0,
+      return NextResponse.json(
+        {
+          cart: {
+            id: null,
+            items: [],
+            itemCount: 0,
+            subtotal: 0,
+            discount: 0,
+            discountPercent: 0,
+            total: 0,
+          },
         },
-      })
+        { headers: NO_STORE_HEADERS }
+      )
     }
 
     const items = cart.items.map((item) => {
@@ -179,17 +191,20 @@ export async function GET() {
     const discount = (subtotal * discountPercent) / 100
     const total = subtotal - discount
 
-    return NextResponse.json({
-      cart: {
-        id: cart.id,
-        items,
-        itemCount: items.reduce((sum, item) => sum + item.quantity, 0),
-        subtotal,
-        discount,
-        discountPercent,
-        total,
+    return NextResponse.json(
+      {
+        cart: {
+          id: cart.id,
+          items,
+          itemCount: items.reduce((sum, item) => sum + item.quantity, 0),
+          subtotal,
+          discount,
+          discountPercent,
+          total,
+        },
       },
-    })
+      { headers: NO_STORE_HEADERS }
+    )
   } catch (error) {
     console.error("Error fetching cart:", error)
     return NextResponse.json({ error: "Error fetching cart" }, { status: 500 })

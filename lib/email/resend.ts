@@ -2,14 +2,22 @@ import { Resend } from "resend"
 
 // Lazy initialization to avoid errors during build
 let resendClient: Resend | null = null
+let warnedMissingResendKey = false
+
+export function isResendConfigured(): boolean {
+  return Boolean(process.env.RESEND_API_KEY?.trim())
+}
 
 export function getResendClient(): Resend | null {
-  if (!process.env.RESEND_API_KEY) {
-    console.warn("RESEND_API_KEY is not configured. Email sending is disabled.")
+  if (!isResendConfigured()) {
+    if (!warnedMissingResendKey) {
+      warnedMissingResendKey = true
+      console.warn("RESEND_API_KEY is not configured. Email sending via Resend is disabled.")
+    }
     return null
   }
   if (!resendClient) {
-    resendClient = new Resend(process.env.RESEND_API_KEY)
+    resendClient = new Resend(process.env.RESEND_API_KEY!.trim())
   }
   return resendClient
 }

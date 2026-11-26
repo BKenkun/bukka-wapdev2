@@ -1,7 +1,7 @@
 "use client"
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { IconSettings, IconShieldCheck, IconLock, IconMail, IconLayoutBottombar, IconPalette, IconPlaylist, IconShoppingBag, IconSearch, IconSpeakerphone, IconMessageCircle } from "@tabler/icons-react"
+import { IconSettings, IconShieldCheck, IconLock, IconMail, IconLayoutBottombar, IconPalette, IconPlaylist, IconShoppingBag, IconSearch, IconSpeakerphone, IconMessageCircle, IconCreditCard } from "@tabler/icons-react"
 import { GeneralSettings } from "./general-settings"
 import { AgeVerificationSettings } from "./age-verification-settings"
 import { VideoAccessSettings } from "./video-access-settings"
@@ -13,6 +13,7 @@ import { ProductSettings } from "./shop-settings"
 import { SearchSettings } from "./search-settings"
 import { DiscountBannerSettings } from "./discount-banner-settings"
 import { ContactSettings } from "./contact-settings"
+import { PaymentProcessorSettings } from "./payment-processor-settings"
 
 export default function SettingsPage() {
   return (
@@ -37,6 +38,10 @@ export default function SettingsPage() {
           <TabsTrigger value="age-verification" className="gap-2">
             <IconShieldCheck className="size-4" />
             Verificación de Edad
+          </TabsTrigger>
+          <TabsTrigger value="payments" className="gap-2">
+            <IconCreditCard className="size-4" />
+            Pagos
           </TabsTrigger>
           <TabsTrigger value="video-access" className="gap-2">
             <IconLock className="size-4" />
@@ -82,6 +87,10 @@ export default function SettingsPage() {
 
         <TabsContent value="age-verification">
           <AgeVerificationSettings />
+        </TabsContent>
+
+        <TabsContent value="payments">
+          <PaymentProcessorSettings />
         </TabsContent>
 
         <TabsContent value="video-access">

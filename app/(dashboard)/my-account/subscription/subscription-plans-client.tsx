@@ -8,6 +8,7 @@ import {
   type AppliedReferral,
 } from "@/components/referral-code-input"
 import { toast } from "sonner"
+import { safeParseJson } from "@/lib/safe-json"
 
 interface TransformedPlan {
   id: string
@@ -47,28 +48,27 @@ export function SubscriptionPlansClient({ plans }: SubscriptionPlansClientProps)
     setSubscribingPlanId(planId)
 
     try {
-      const res = await fetch("/api/payments/easierpay/subscribe", {
+      const res = await fetch("/api/payments/subscribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({
           planId,
           referralCode: appliedReferral?.code || undefined,
         }),
       })
 
-      if (res.ok) {
-        const data = await res.json()
-        if (data.payLink) {
-          toast.info("Redirecting to payment gateway...")
-          window.location.href = data.payLink
-          return
-        }
+      const data = await safeParseJson<{ payLink?: string; error?: string }>(res)
+
+      if (res.ok && data?.payLink) {
+        toast.info("Redirecting to payment gateway...")
+        window.location.href = data.payLink
+        return
       }
 
-      const error = await res.json().catch(() => null)
-      toast.error(error?.error || "Error processing subscription")
+      toast.error(data?.error || "Error processing subscription")
     } catch (error) {
-      console.error("Error subscribing:", error)
+      console.warn("Error subscribing:", error)
       toast.error("Error processing subscription")
     } finally {
       setSubscribingPlanId(null)

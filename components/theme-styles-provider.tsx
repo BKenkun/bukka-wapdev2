@@ -1,6 +1,4 @@
-"use client"
-
-import * as React from "react"
+import type React from "react"
 
 interface ButtonSettings {
   backgroundColor: string
@@ -327,32 +325,28 @@ interface ThemeStylesProviderProps {
 }
 
 export function ThemeStylesProvider({ children, initialTheme }: ThemeStylesProviderProps) {
-  const [theme] = React.useState<ThemeSettings>(() => {
-    if (initialTheme) {
-      return deepMerge(defaultTheme as unknown as Record<string, unknown>, initialTheme) as unknown as ThemeSettings
-    }
-    return defaultTheme
-  })
+  const theme: ThemeSettings = initialTheme
+    ? (deepMerge(defaultTheme as unknown as Record<string, unknown>, initialTheme) as unknown as ThemeSettings)
+    : defaultTheme
 
-  const cssVariables = React.useMemo(() => {
-    const g = theme.global
-    const tb = theme.topBar
-    const h = theme.header
-    const sh = theme.sectionHeaders
-    const vc = theme.videoCards
-    const pc = theme.performerCards
-    const cta = theme.ctaBanner
-    const cd = theme.countdown
-    const f = theme.footer
-    const fo = theme.forms
-    const ca = theme.cart
-    const cs = theme.comingSoon
-    const ca2 = theme.carouselArrows
-    const bp = theme.buttons.primary
-    const bs = theme.buttons.secondary
-    const vs = theme.variantSelector
+  const g = theme.global
+  const tb = theme.topBar
+  const h = theme.header
+  const sh = theme.sectionHeaders
+  const vc = theme.videoCards
+  const pc = theme.performerCards
+  const cta = theme.ctaBanner
+  const cd = theme.countdown
+  const f = theme.footer
+  const fo = theme.forms
+  const ca = theme.cart
+  const cs = theme.comingSoon
+  const ca2 = theme.carouselArrows
+  const bp = theme.buttons.primary
+  const bs = theme.buttons.secondary
+  const vs = theme.variantSelector
 
-    return `
+  const cssVariables = `
       :root {
         /* Global */
         --global-bg: ${g.backgroundColor};
@@ -573,8 +567,7 @@ export function ThemeStylesProvider({ children, initialTheme }: ThemeStylesProvi
         opacity: 0.5;
         cursor: not-allowed;
       }
-    `
-  }, [theme])
+  `
 
   return (
     <>

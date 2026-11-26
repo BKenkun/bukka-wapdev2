@@ -1,6 +1,6 @@
 "use client"
 
-import { Suspense } from "react"
+import { Suspense, useEffect } from "react"
 import { SessionProvider } from "next-auth/react"
 import { Toaster } from "@/components/ui/sonner"
 import { SubscriptionProvider } from "@/components/subscription-provider"
@@ -14,6 +14,23 @@ interface ProvidersProps {
 }
 
 export function Providers({ children }: ProvidersProps) {
+  useEffect(() => {
+    const handleResizeObserverLoopError = (event: ErrorEvent) => {
+      if (
+        event.message === "ResizeObserver loop completed with undelivered notifications." ||
+        event.message === "ResizeObserver loop limit exceeded"
+      ) {
+        event.stopImmediatePropagation()
+        event.preventDefault()
+      }
+    }
+
+    window.addEventListener("error", handleResizeObserverLoopError, true)
+    return () => {
+      window.removeEventListener("error", handleResizeObserverLoopError, true)
+    }
+  }, [])
+
   return (
     <SessionProvider>
       <SubscriptionProvider>

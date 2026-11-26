@@ -1,0 +1,807 @@
+import { projectId, databaseId, runWithAdminFirestore } from './firebaseAdmin';
+import { fromFirestoreRestValue } from '../lib/firebase-admin';
+import { readPacklinkSettings } from '../lib/packlink-config';
+import { DEFAULT_SITE_CONFIG } from '../data/defaultSiteConfig';
+import { INITIAL_PROMO_CODES } from '../data/initialData';
+
+export interface ServerShippingQuote {
+  serviceId: string;
+  serviceName: string;
+  carrierName: string;
+  price: number;
+  currency: string;
+  transitDays: string;
+  category?: string;
+  homeDelivery?: boolean;
+  requiresDropoffPoint?: boolean;
+  senderDropoff?: boolean;
+  printerRequired?: boolean;
+  trackingIncluded?: boolean;
+  isZonalFallback?: boolean;
+}
+
+export interface ServerCheckoutItemInput {
+  productId: string;
+  quantity: number;
+  color?: string;
+  size?: string;
+}
+
+export interface ServerVerifiedOrderLine {
+  productId: string;
+  productName: string;
+  price: number;
+  quantity: number;
+  color: string;
+  size: string;
+  image: string;
+  creatorId?: string;
+  modelNames?: string[];
+  editionTier?: 'standard' | 'signature';
+}
+
+export interface ServerPricingSummary {
+  items: ServerVerifiedOrderLine[];
+  subtotal: number;
+  volumeDiscount: number;
+  volumeDiscountPercent: number;
+  discount: number;
+  shipping: number;
+  total: number;
+  amountInCents: number;
+  appliedPromoCode?: string;
+  isFreeShippingPromo: boolean;
+  verifiedQuote?: ServerShippingQuote;
+}
+
+const COUNTRY_ISO_MAP: Record<string, string> = {
+  ES: 'ES',
+  SPAIN: 'ES',
+  ESPAÑA: 'ES',
+  ESPANA: 'ES',
+  PT: 'PT',
+  PORTUGAL: 'PT',
+  FR: 'FR',
+  FRANCE: 'FR',
+  FRANCIA: 'FR',
+  DE: 'DE',
+  GERMANY: 'DE',
+  ALEMANIA: 'DE',
+  IT: 'IT',
+  ITALY: 'IT',
+  ITALIA: 'IT',
+  BE: 'BE',
+  BELGIUM: 'BE',
+  BELGICA: 'BE',
+  'BÉLGICA': 'BE',
+  NL: 'NL',
+  NETHERLANDS: 'NL',
+  HOLANDA: 'NL',
+  'PAISES BAJOS': 'NL',
+  'PAÍSES BAJOS': 'NL',
+  IE: 'IE',
+  IRELAND: 'IE',
+  IRLANDA: 'IE',
+  GB: 'GB',
+  UK: 'GB',
+  'UNITED KINGDOM': 'GB',
+  'REINO UNIDO': 'GB',
+  AD: 'AD',
+  ANDORRA: 'AD',
+  CH: 'CH',
+  SWITZERLAND: 'CH',
+  SUIZA: 'CH',
+  AT: 'AT',
+  AUSTRIA: 'AT',
+  US: 'US',
+  USA: 'US',
+  'ESTADOS UNIDOS': 'US',
+  'UNITED STATES': 'US',
+  MX: 'MX',
+  MEXICO: 'MX',
+  'MÉXICO': 'MX'
+};
+
+export function normalizeCountryToIso(rawCountry?: string): string | null {
+  const clean = String(rawCountry || '').trim().toUpperCase();
+  return COUNTRY_ISO_MAP[clean] || (/^[A-Z]{2}$/.test(clean) ? clean : null);
+}
+
+function formatTransitHours(rawHours: unknown): string {
+  const hrs = Number(rawHours);
+  if (!Number.isFinite(hrs) || hrs <= 0) return '24-72h';
+  if (hrs <= 24) return '24h laborables';
+  if (hrs <= 48) return '24-48h';
+  if (hrs <= 72) return '48-72h';
+  const days = Math.max(2, Math.ceil(hrs / 24));
+  return `${days - 1}-${days} días laborables`;
+}
+
+/**
+ * Single authoritative shipping rate calculator (Packlink PRO live API + deterministic zonal fallback).
+ */
+export async function getServerShippingQuotes(params: {
+  postalCode: string;
+  country: string;
+  maxOptionsOverride?: number;
+  ignoreCarrierFilter?: boolean;
+}): Promise<{
+  isoCountry: string;
+  quotes: ServerShippingQuote[];
+  source: 'packlink_live' | 'zonal_fallback';
+  originCountry: string;
+  originPostalCode: string;
+  totalPacklinkCandidates?: number;
+}> {
+  const cleanPostal = String(params.postalCode || '').trim();
+  const isoCountry = normalizeCountryToIso(params.country);
+
+  if (!cleanPostal || cleanPostal.length < 3) {
+    throw new Error('Introduce un código postal válido para calcular el envío.');
+  }
+  if (!isoCountry) {
+    throw new Error(
+      'Introduce el país de entrega o su código ISO de 2 letras (ej. España, ES, Portugal, Francia).'
+    );
+  }
+  if (isoCountry === 'ES' && !/^\d{5}$/.test(cleanPostal)) {
+    throw new Error('Para envíos en España, el código postal debe tener 5 dígitos (ej. 28001).');
+  }
+
+  const origin = await readPacklinkSettings();
+  const maxOptions = Number.isFinite(params.maxOptionsOverride)
+    ? Math.min(12, Math.max(2, Number(params.maxOptionsOverride)))
+    : Math.min(8, Math.max(2, Number(origin.maxOptionsShown) || 5));
+
+  const homeDeliveryOnly = origin.homeDeliveryOnly ?? true;
+  const excludeSenderDropoff = origin.excludeSenderDropoff ?? false;
+  const allowedCarriersNormalized = !params.ignoreCarrierFilter && Array.isArray(origin.allowedCarriers)
+    ? origin.allowedCarriers.map((c) => c.trim().toLowerCase()).filter(Boolean)
+    : [];
+
+  const packlinkApiKey = process.env.PACKLINK_API_KEY?.trim();
+  if (packlinkApiKey) {
+    try {
+      const queryParams = new URLSearchParams({
+        'from[country]': origin.country || 'ES',
+        'from[zip]': origin.postalCode || '28001',
+        'to[country]': isoCountry,
+        'to[zip]': cleanPostal,
+        'packages[0][weight]': String(origin.weightKg || 0.5),
+        'packages[0][length]': String(origin.lengthCm || 28),
+        'packages[0][width]': String(origin.widthCm || 20),
+        'packages[0][height]': String(origin.heightCm || 6)
+      });
+      const plResp = await fetch(`https://api.packlink.com/v1/services?${queryParams.toString()}`, {
+        headers: {
+          Authorization: packlinkApiKey,
+          Accept: 'application/json',
+          'Content-Type': 'application/json'
+        }
+      });
+      if (plResp.ok) {
+        const plData = await plResp.json();
+        const rawList = Array.isArray(plData)
+          ? plData
+          : Array.isArray(plData?.services)
+          ? plData.services
+          : [];
+
+        if (rawList.length > 0) {
+          const allNormalized: ServerShippingQuote[] = rawList
+            .map((s: any): ServerShippingQuote => {
+              const serviceName = String(s.name || s.service_name || 'Mensajería con Seguimiento').trim();
+              const nameLc = serviceName.toLowerCase();
+              const isLockerOrOfficeDest =
+                nameLc.includes('-oficina') ||
+                nameLc.includes('en oficina') ||
+                nameLc.includes('parcelshop') ||
+                nameLc.includes('punto pack') ||
+                nameLc.includes('citypaq') ||
+                nameLc.includes('locker') ||
+                nameLc.includes('servicepoint');
+              const requiresDropoff = Boolean(
+                s.delivery_to_parcelshop ?? s.requiresDropoffPoint ?? isLockerOrOfficeDest
+              );
+              const senderDropoff = Boolean(
+                s.dropoff ?? (nameLc.startsWith('oficina-') || nameLc.includes('oficina-oficina'))
+              );
+              const rawPrice = Number(
+                s.price?.total_price ?? s.total_price ?? s.price?.base_price ?? s.base_price
+              );
+              return {
+                serviceId: String(s.id ?? s.service_id ?? ''),
+                serviceName,
+                carrierName: String(s.carrier_name || s.carrier || 'Packlink Courier').trim(),
+                price: Number.isFinite(rawPrice) ? Number(rawPrice.toFixed(2)) : 0,
+                currency: String(s.currency || s.price?.currency || 'EUR'),
+                transitDays: formatTransitHours(s.transit_hours),
+                category: String(s.category || 'standard').toLowerCase(),
+                homeDelivery: !requiresDropoff,
+                requiresDropoffPoint: requiresDropoff,
+                senderDropoff,
+                printerRequired: s.printer_needed !== undefined ? Boolean(s.printer_needed) : true,
+                trackingIncluded: true,
+                isZonalFallback: false
+              };
+            })
+            .filter((q: ServerShippingQuote) => Boolean(q.serviceId && Number.isFinite(q.price) && q.price > 0));
+
+          let eligible = allNormalized.filter((q) => {
+            if (homeDeliveryOnly && q.requiresDropoffPoint) return false;
+            if (excludeSenderDropoff && q.senderDropoff) return false;
+            if (allowedCarriersNormalized.length > 0) {
+              const lcCarrier = q.carrierName.toLowerCase();
+              if (!allowedCarriersNormalized.some((allowed) => lcCarrier.includes(allowed))) {
+                return false;
+              }
+            }
+            return true;
+          });
+
+          // If strict carrier filter excluded everything, relax carrier whitelist while keeping delivery safety
+          if (eligible.length === 0 && allowedCarriersNormalized.length > 0) {
+            eligible = allNormalized.filter(
+              (q) =>
+                (!homeDeliveryOnly || !q.requiresDropoffPoint) &&
+                (!excludeSenderDropoff || !q.senderDropoff)
+            );
+          }
+
+          eligible.sort((a, b) => a.price - b.price);
+
+          // Deduplicate identical carrier + service name variants keeping cheapest first,
+          // and select diverse carrier options up to `maxOptions`
+          const seenKeys = new Set<string>();
+          const curated: ServerShippingQuote[] = [];
+          for (const q of eligible) {
+            const key = `${q.carrierName.toLowerCase()}::${q.serviceName.toLowerCase()}`;
+            if (seenKeys.has(key)) continue;
+            seenKeys.add(key);
+            curated.push(q);
+            if (curated.length >= maxOptions) break;
+          }
+
+          if (curated.length > 0) {
+            return {
+              isoCountry,
+              quotes: curated,
+              source: 'packlink_live',
+              originCountry: origin.country || 'ES',
+              originPostalCode: origin.postalCode || '28001',
+              totalPacklinkCandidates: allNormalized.length
+            };
+          }
+        }
+      }
+    } catch (plErr: any) {
+      console.warn('[Packlink API] Usando tarifas zonales de respaldo:', plErr?.message);
+    }
+  }
+
+  let quotes: ServerShippingQuote[] = [];
+  if (isoCountry === 'ES') {
+    const prefix = cleanPostal.slice(0, 2);
+    if (prefix === '35' || prefix === '38' || prefix === '51' || prefix === '52') {
+      quotes = [
+        {
+          serviceId: 'pl_es_islands_std',
+          serviceName: 'Entrega a Domicilio Certificada',
+          carrierName: 'Correos Express',
+          price: 9.95,
+          currency: 'EUR',
+          transitDays: '3-5 días laborables',
+          category: 'standard',
+          homeDelivery: true,
+          requiresDropoffPoint: false,
+          senderDropoff: false,
+          trackingIncluded: true,
+          isZonalFallback: true
+        },
+        {
+          serviceId: 'pl_es_islands_vip',
+          serviceName: 'Envío Aéreo Prioritario VIP',
+          carrierName: 'DHL Express',
+          price: 14.95,
+          currency: 'EUR',
+          transitDays: '48-72h',
+          category: 'express',
+          homeDelivery: true,
+          requiresDropoffPoint: false,
+          senderDropoff: false,
+          trackingIncluded: true,
+          isZonalFallback: true
+        }
+      ];
+    } else if (prefix === '07') {
+      quotes = [
+        {
+          serviceId: 'pl_es_baleares_std',
+          serviceName: 'Entrega Discreta con Seguimiento',
+          carrierName: 'SEUR',
+          price: 6.95,
+          currency: 'EUR',
+          transitDays: '48-72h',
+          category: 'standard',
+          homeDelivery: true,
+          requiresDropoffPoint: false,
+          senderDropoff: false,
+          trackingIncluded: true,
+          isZonalFallback: true
+        },
+        {
+          serviceId: 'pl_es_baleares_exp',
+          serviceName: 'Entrega Exprés Preferente',
+          carrierName: 'DHL Parcel',
+          price: 9.95,
+          currency: 'EUR',
+          transitDays: '24-48h',
+          category: 'express',
+          homeDelivery: true,
+          requiresDropoffPoint: false,
+          senderDropoff: false,
+          trackingIncluded: true,
+          isZonalFallback: true
+        }
+      ];
+    } else {
+      quotes = [
+        {
+          serviceId: 'pl_es_peninsula_std',
+          serviceName: 'Entrega Discreta Estándar',
+          carrierName: 'Correos Express 24/48',
+          price: 5.99,
+          currency: 'EUR',
+          transitDays: '24-48h',
+          category: 'standard',
+          homeDelivery: true,
+          requiresDropoffPoint: false,
+          senderDropoff: false,
+          trackingIncluded: true,
+          isZonalFallback: true
+        },
+        {
+          serviceId: 'pl_es_peninsula_gls',
+          serviceName: 'Business Parcel Domicilio',
+          carrierName: 'GLS Spain',
+          price: 6.45,
+          currency: 'EUR',
+          transitDays: '24-48h',
+          category: 'standard',
+          homeDelivery: true,
+          requiresDropoffPoint: false,
+          senderDropoff: false,
+          trackingIncluded: true,
+          isZonalFallback: true
+        },
+        {
+          serviceId: 'pl_es_peninsula_vip',
+          serviceName: 'Entrega Exprés VIP Garantizada',
+          carrierName: 'SEUR 24 / MRW',
+          price: 8.95,
+          currency: 'EUR',
+          transitDays: '24h antes de las 14:00',
+          category: 'express',
+          homeDelivery: true,
+          requiresDropoffPoint: false,
+          senderDropoff: false,
+          trackingIncluded: true,
+          isZonalFallback: true
+        }
+      ];
+    }
+  } else if (isoCountry === 'PT' || isoCountry === 'AD') {
+    quotes = [
+      {
+        serviceId: 'pl_iberia_std',
+        serviceName: 'Mensajería Ibérica Discreta',
+        carrierName: 'SEUR Internacional',
+        price: 6.5,
+        currency: 'EUR',
+        transitDays: '48-72h',
+        category: 'standard',
+        homeDelivery: true,
+        requiresDropoffPoint: false,
+        senderDropoff: false,
+        trackingIncluded: true,
+        isZonalFallback: true
+      },
+      {
+        serviceId: 'pl_iberia_exp',
+        serviceName: 'Exprés Ibérico 24/48h',
+        carrierName: 'DHL Express',
+        price: 10.9,
+        currency: 'EUR',
+        transitDays: '24-48h',
+        category: 'express',
+        homeDelivery: true,
+        requiresDropoffPoint: false,
+        senderDropoff: false,
+        trackingIncluded: true,
+        isZonalFallback: true
+      }
+    ];
+  } else if (['FR', 'DE', 'IT', 'BE', 'NL', 'IE', 'AT'].includes(isoCountry)) {
+    quotes = [
+      {
+        serviceId: 'pl_eu_std',
+        serviceName: 'Envío Europeo con Seguimiento',
+        carrierName: 'UPS Standard',
+        price: 8.95,
+        currency: 'EUR',
+        transitDays: '3-5 días laborables',
+        category: 'standard',
+        homeDelivery: true,
+        requiresDropoffPoint: false,
+        senderDropoff: false,
+        trackingIncluded: true,
+        isZonalFallback: true
+      },
+      {
+        serviceId: 'pl_eu_exp',
+        serviceName: 'Envío Europeo Exprés VIP',
+        carrierName: 'DHL Express',
+        price: 14.9,
+        currency: 'EUR',
+        transitDays: '24-48h',
+        category: 'express',
+        homeDelivery: true,
+        requiresDropoffPoint: false,
+        senderDropoff: false,
+        trackingIncluded: true,
+        isZonalFallback: true
+      }
+    ];
+  } else {
+    quotes = [
+      {
+        serviceId: 'pl_intl_std',
+        serviceName: 'Envío Internacional Asegurado',
+        carrierName: 'DHL Global',
+        price: 14.95,
+        currency: 'EUR',
+        transitDays: '4-7 días laborables',
+        category: 'standard',
+        homeDelivery: true,
+        requiresDropoffPoint: false,
+        senderDropoff: false,
+        trackingIncluded: true,
+        isZonalFallback: true
+      },
+      {
+        serviceId: 'pl_intl_exp',
+        serviceName: 'Envío Internacional Exprés',
+        carrierName: 'FedEx Priority',
+        price: 22.9,
+        currency: 'EUR',
+        transitDays: '2-4 días laborables',
+        category: 'express',
+        homeDelivery: true,
+        requiresDropoffPoint: false,
+        senderDropoff: false,
+        trackingIncluded: true,
+        isZonalFallback: true
+      }
+    ];
+  }
+
+  return {
+    isoCountry,
+    quotes: quotes.slice(0, maxOptions),
+    source: 'zonal_fallback',
+    originCountry: origin.country || 'ES',
+    originPostalCode: origin.postalCode || '28001'
+  };
+}
+
+function decodeFirestoreDoc(rawDoc: any): Record<string, any> | null {
+  if (!rawDoc || typeof rawDoc !== 'object' || !rawDoc.fields) return null;
+  const out: Record<string, any> = {};
+  for (const [k, v] of Object.entries(rawDoc.fields)) {
+    out[k] = fromFirestoreRestValue(v as Record<string, any>);
+  }
+  return out;
+}
+
+function getFirestoreBaseUrl(): string {
+  return `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+    projectId
+  )}/databases/${encodeURIComponent(databaseId)}/documents`;
+}
+
+async function fetchPublicDocServer(collectionName: string, docId: string): Promise<Record<string, any> | null> {
+  const adminRes = await runWithAdminFirestore(async (adminDb) => {
+    const snap = await adminDb.collection(collectionName).doc(docId).get();
+    return snap.exists ? ({ id: snap.id, ...snap.data() } as Record<string, any>) : null;
+  }, `read-${collectionName}`);
+
+  if (adminRes.available) {
+    return adminRes.result;
+  }
+
+  const url = `${getFirestoreBaseUrl()}/${encodeURIComponent(collectionName)}/${encodeURIComponent(docId)}`;
+  const resp = await fetch(url).catch(() => null);
+  if (!resp || !resp.ok) return null;
+  const raw = await resp.json().catch(() => null);
+  const decoded = decodeFirestoreDoc(raw);
+  if (!decoded) return null;
+  return { id: docId, ...decoded };
+}
+
+async function fetchAllPromoCodesServer(): Promise<Array<Record<string, any>>> {
+  const adminRes = await runWithAdminFirestore(async (adminDb) => {
+    const snap = await adminDb.collection('promoCodes').get();
+    return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Record<string, any>);
+  }, 'read-promoCodes');
+
+  if (adminRes.available) {
+    return adminRes.result.length > 0 ? adminRes.result : INITIAL_PROMO_CODES;
+  }
+
+  const url = `${getFirestoreBaseUrl()}/promoCodes?pageSize=200`;
+  const resp = await fetch(url).catch(() => null);
+  if (resp && resp.ok) {
+    const json: any = await resp.json().catch(() => null);
+    const docs = Array.isArray(json?.documents) ? json.documents : [];
+    const parsed = docs
+      .map((d: any) => {
+        const decoded = decodeFirestoreDoc(d);
+        if (!decoded) return null;
+        const nameParts = String(d.name || '').split('/');
+        return { id: nameParts[nameParts.length - 1] || decoded.id, ...decoded };
+      })
+      .filter(Boolean) as Array<Record<string, any>>;
+    if (parsed.length > 0) return parsed;
+  }
+
+  return INITIAL_PROMO_CODES;
+}
+
+function round2(n: number): number {
+  return Number((Number(n) || 0).toFixed(2));
+}
+
+export class CheckoutPricingError extends Error {
+  statusCode: number;
+  constructor(message: string, statusCode = 400) {
+    super(message);
+    this.statusCode = statusCode;
+  }
+}
+
+/**
+ * Recalculates authoritative cart prices, discounts, shipping, and total in cents
+ * strictly from Firestore catalog/settings/shipping rules on the server.
+ */
+export async function calculateServerOrderTotals(params: {
+  items: ServerCheckoutItemInput[];
+  promoCode?: string;
+  shippingAddress?: { postalCode?: string; country?: string };
+  selectedServiceId?: string;
+}): Promise<ServerPricingSummary> {
+  const rawItems = Array.isArray(params.items) ? params.items : [];
+  if (rawItems.length === 0 || rawItems.length > 50) {
+    throw new CheckoutPricingError('El carrito está vacío o supera el máximo permitido.');
+  }
+
+  // Deduplicate reads for identical productIds
+  const uniqueProductIds = Array.from(
+    new Set(
+      rawItems
+        .map((i) => String(i?.productId || '').trim())
+        .filter((id) => /^[a-zA-Z0-9_-]{1,128}$/.test(id))
+    )
+  );
+
+  if (uniqueProductIds.length === 0) {
+    throw new CheckoutPricingError('Los artículos del carrito no tienen identificadores válidos.');
+  }
+
+  const [siteDoc, ...fetchedProducts] = await Promise.all([
+    fetchPublicDocServer('appSettings', 'site'),
+    ...uniqueProductIds.map((id) => fetchPublicDocServer('products', id))
+  ]);
+
+  const productById = new Map<string, Record<string, any>>();
+  uniqueProductIds.forEach((id, idx) => {
+    const docData = fetchedProducts[idx];
+    if (docData) {
+      productById.set(id, docData);
+    }
+  });
+
+  const nowMs = Date.now();
+  const verifiedLines: ServerVerifiedOrderLine[] = [];
+  let subtotal = 0;
+  let totalUnits = 0;
+
+  for (const rawLine of rawItems) {
+    const productId = String(rawLine?.productId || '').trim();
+    const qty = Math.floor(Number(rawLine?.quantity));
+    if (!productId || !Number.isFinite(qty) || qty < 1 || qty > 50) {
+      throw new CheckoutPricingError('Cantidad o artículo no válido en el carrito.');
+    }
+
+    const product = productById.get(productId);
+    if (!product) {
+      throw new CheckoutPricingError(
+        `Uno de los artículos de tu bolsa ya no está disponible en el catálogo (${productId}).`,
+        404
+      );
+    }
+
+    const allowPreorder = Boolean(product.allowPreorder);
+    const availStatus = String(product.availabilityStatus || 'available');
+    const cooldownMs = product.cooldownUntil ? new Date(String(product.cooldownUntil)).getTime() : NaN;
+    const isInActiveCooldown =
+      availStatus === 'cooldown' && (!Number.isFinite(cooldownMs) || cooldownMs > nowMs);
+
+    if (
+      availStatus === 'sold_out' ||
+      availStatus === 'reserved' ||
+      (isInActiveCooldown && !allowPreorder) ||
+      (product.inStock === false && !allowPreorder && availStatus !== 'in_production')
+    ) {
+      throw new CheckoutPricingError(
+        `La prenda "${product.name || productId}" se encuentra reservada o en periodo de reposición temporal.`,
+        409
+      );
+    }
+
+    const unitPrice = round2(Number(product.price));
+    if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
+      throw new CheckoutPricingError(`Precio inválido para "${product.name || productId}".`, 400);
+    }
+
+    subtotal = round2(subtotal + unitPrice * qty);
+    totalUnits += qty;
+
+    const firstImg = Array.isArray(product.images) && product.images.length > 0 ? String(product.images[0]) : '';
+    verifiedLines.push({
+      productId,
+      productName: String(product.name || 'Prenda Exclusiva').slice(0, 150),
+      price: unitPrice,
+      quantity: qty,
+      color: String(rawLine.color || 'Estándar').slice(0, 64),
+      size: String(rawLine.size || 'Única').slice(0, 32),
+      image: firstImg,
+      ...(product.creatorId ? { creatorId: String(product.creatorId) } : {}),
+      ...(Array.isArray(product.modelIds) ? { modelNames: product.modelIds.map(String) } : {}),
+      editionTier: product.editionTier === 'signature' ? 'signature' : 'standard'
+    });
+  }
+
+  // Site product rules (volume discount + free shipping threshold + flat rate)
+  const productCfg = (siteDoc?.siteConfig?.product || DEFAULT_SITE_CONFIG.product) as Record<string, any>;
+  const enableVolume = productCfg.enableVolumeDiscounts ?? true;
+  const volumeDiscountPercent = enableVolume ? (totalUnits >= 3 ? 10 : totalUnits === 2 ? 5 : 0) : 0;
+  const volumeDiscount = round2((subtotal * volumeDiscountPercent) / 100);
+  const subtotalAfterVolume = Math.max(0, round2(subtotal - volumeDiscount));
+
+  // Authoritative promo code check
+  let discount = 0;
+  let appliedPromoCode: string | undefined;
+  let isFreeShippingPromo = false;
+
+  const cleanCode = String(params.promoCode || '').trim().toUpperCase();
+  if (cleanCode) {
+    const promos = await fetchAllPromoCodesServer();
+    const matched = promos.find(
+      (p) => String(p.code || '').trim().toUpperCase() === cleanCode && Boolean(p.active)
+    );
+    if (!matched) {
+      throw new CheckoutPricingError(`El cupón ${cleanCode} no es válido o ya no está activo.`, 400);
+    }
+    const maxUses = Number(matched.maxUses) || 0;
+    const usesCount = Number(matched.usesCount) || 0;
+    if (maxUses > 0 && usesCount >= maxUses) {
+      throw new CheckoutPricingError(`El cupón ${cleanCode} ha alcanzado su límite máximo de usos.`, 400);
+    }
+    if (matched.validUntil) {
+      const expDate = new Date(String(matched.validUntil));
+      if (!Number.isNaN(expDate.getTime()) && expDate.getTime() < nowMs - 86400000) {
+        throw new CheckoutPricingError(`El cupón ${cleanCode} ha expirado.`, 400);
+      }
+    }
+    const minOrderAmount = Number(matched.minOrderAmount) || 0;
+    if (minOrderAmount > 0 && subtotal < minOrderAmount) {
+      throw new CheckoutPricingError(
+        `El cupón ${cleanCode} requiere un pedido mínimo de ${minOrderAmount.toFixed(2)} €.`,
+        400
+      );
+    }
+
+    appliedPromoCode = String(matched.code).trim().toUpperCase();
+    const dType = String(matched.discountType || '');
+    const dVal = Number(matched.discountValue) || 0;
+    if (dType === 'free_shipping') {
+      isFreeShippingPromo = true;
+    } else if ((dType === 'percent' || dType === 'percentage') && dVal > 0) {
+      discount = round2((subtotalAfterVolume * Math.min(100, dVal)) / 100);
+    } else if (dType === 'fixed' && dVal > 0) {
+      discount = round2(Math.min(subtotalAfterVolume, dVal));
+    }
+  }
+
+  const subtotalAfterAllDiscounts = round2(Math.max(0, subtotalAfterVolume - discount));
+  const freeShippingThreshold = Number(productCfg.freeShippingThreshold ?? 40.0);
+  const flatShippingRate = Number(productCfg.flatShippingRate ?? 5.99);
+  const qualifiesForFreeStandard = subtotalAfterAllDiscounts >= freeShippingThreshold || isFreeShippingPromo;
+
+  let shipping = 0;
+  let verifiedQuote: ServerShippingQuote | undefined;
+
+  const postalCode = String(params.shippingAddress?.postalCode || '').trim();
+  const country = String(params.shippingAddress?.country || '').trim();
+
+  if (postalCode && country) {
+    const { quotes } = await getServerShippingQuotes({ postalCode, country });
+    const cheapest = quotes[0];
+    const requestedId = String(params.selectedServiceId || '').trim();
+    const chosen = requestedId ? quotes.find((q) => q.serviceId === requestedId) || cheapest : cheapest;
+    verifiedQuote = chosen;
+
+    if (qualifiesForFreeStandard && chosen.serviceId === cheapest.serviceId) {
+      shipping = 0;
+    } else {
+      shipping = round2(chosen.price);
+    }
+  } else {
+    shipping = qualifiesForFreeStandard ? 0 : round2(flatShippingRate);
+  }
+
+  const total = round2(Math.max(0, subtotalAfterAllDiscounts + shipping));
+  const amountInCents = Math.round(total * 100);
+  if (!Number.isFinite(amountInCents) || amountInCents <= 0) {
+    throw new CheckoutPricingError('El importe calculado del pedido no es válido.', 400);
+  }
+
+  return {
+    items: verifiedLines,
+    subtotal,
+    volumeDiscount,
+    volumeDiscountPercent,
+    discount,
+    shipping,
+    total,
+    amountInCents,
+    ...(appliedPromoCode ? { appliedPromoCode } : {}),
+    isFreeShippingPromo,
+    ...(verifiedQuote ? { verifiedQuote } : {})
+  };
+}
+
+export const DEFAULT_SUBSCRIPTION_PRICE_EUR = 44;
+export const DEFAULT_SUBSCRIPTION_PLAN_NAME = "Club Privé Chloe's Secrets (Suscripción Mensual)";
+
+/**
+ * Reads the admin-configured monthly subscription price & plan name from Firestore (appSettings/site)
+ * and clamps it to a safe authoritative EUR amount on the server.
+ */
+export async function getAuthoritativeSubscriptionConfig(): Promise<{
+  priceEur: number;
+  amountInCents: number;
+  planName: string;
+}> {
+  const siteDoc = await fetchPublicDocServer('appSettings', 'site').catch(() => null);
+  const productCfg = (siteDoc?.siteConfig?.product || DEFAULT_SITE_CONFIG.product) as Record<
+    string,
+    any
+  >;
+
+  const rawPrice = Number(productCfg.subscriptionMonthlyPrice);
+  const priceEur =
+    Number.isFinite(rawPrice) && rawPrice >= 1 && rawPrice <= 5000
+      ? round2(rawPrice)
+      : DEFAULT_SUBSCRIPTION_PRICE_EUR;
+
+  const amountInCents = Math.max(100, Math.round(priceEur * 100));
+  const rawName = typeof productCfg.subscriptionPlanName === 'string' ? productCfg.subscriptionPlanName.trim() : '';
+  const planName = rawName ? rawName.slice(0, 120) : DEFAULT_SUBSCRIPTION_PLAN_NAME;
+
+  return {
+    priceEur,
+    amountInCents,
+    planName
+  };
+}

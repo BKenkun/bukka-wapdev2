@@ -1,0 +1,2713 @@
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import {
+  Loader2,
+  Lock,
+  CreditCard,
+  ArrowLeft,
+  ArrowRight,
+  ShieldCheck,
+  AlertTriangle,
+  LogIn,
+  UserPlus,
+  UserCheck,
+  Eye,
+  EyeOff,
+  Sparkles,
+  CheckCircle2,
+  LogOut,
+  Mail,
+  User,
+  Info,
+  Truck,
+  Tag,
+  X,
+  Plus,
+  Minus,
+  Trash2,
+  ShoppingBag,
+  Smartphone,
+  MapPin,
+  Edit2
+} from 'lucide-react';
+import { useStore } from '../../context/StoreContext';
+import { useCheckout } from '../../context/CheckoutContext';
+import { useLocale } from '../../context/LocaleContext';
+import { Order, PacklinkQuote, SavedAddress } from '../../types';
+import { getPacklinkShippingQuotes } from '../../services/shippingService';
+import { createHilowPaymentSession } from '../../services/hilowService';
+import { HilowCheckoutModal } from '../cart/HilowCheckoutModal';
+import { doc, getDoc } from 'firebase/firestore';
+import { db } from '../../lib/firebase';
+
+interface CheckoutFormValues {
+  name: string;
+  email: string;
+  phone: string;
+  street: string;
+  city: string;
+  state: string;
+  postalCode: string;
+  country: string;
+  saveAddress: boolean;
+}
+
+type FieldErrors = Partial<Record<keyof CheckoutFormValues, string>>;
+
+const FIELD_LABELS: Record<keyof CheckoutFormValues, string> = {
+  name: 'Nombre completo',
+  email: 'Correo electrónico',
+  phone: 'Teléfono de contacto',
+  street: 'Dirección de entrega',
+  city: 'Ciudad',
+  state: 'Provincia / Estado',
+  postalCode: 'Código postal',
+  country: 'País',
+  saveAddress: 'Guardar dirección'
+};
+
+function validateCheckoutValues(values: CheckoutFormValues): {
+  valid: boolean;
+  fieldErrors: FieldErrors;
+  lines: string[];
+} {
+  const fieldErrors: FieldErrors = {};
+
+  if (values.name.trim().length < 3) {
+    fieldErrors.name = 'Introduce tu nombre y apellidos completos (mínimo 3 caracteres).';
+  }
+
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(values.email.trim())) {
+    fieldErrors.email = 'Introduce una dirección de correo electrónico válida.';
+  }
+
+  const cleanDigits = values.phone.replace(/[^\d]/g, '');
+  if (cleanDigits.length < 9) {
+    fieldErrors.phone = 'El número de teléfono debe contener al menos 9 dígitos.';
+  }
+
+  if (values.street.trim().length < 5) {
+    fieldErrors.street = 'Indica calle, número y piso o puerta (mínimo 5 caracteres).';
+  }
+
+  if (values.city.trim().length < 2) {
+    fieldErrors.city = 'La ciudad es obligatoria.';
+  }
+
+  if (values.state.trim().length < 2) {
+    fieldErrors.state = 'La provincia o comunidad es obligatoria.';
+  }
+
+  const cleanCountry = values.country.trim().toUpperCase();
+  const isSpain =
+    cleanCountry === 'ESPAÑA' ||
+    cleanCountry === 'ESPANA' ||
+    cleanCountry === 'SPAIN' ||
+    cleanCountry === 'ES';
+
+  if (isSpain && !/^\d{5}$/.test(values.postalCode.trim())) {
+    fieldErrors.postalCode = 'En España el código postal debe tener exactamente 5 dígitos (ej. 28001).';
+  } else if (values.postalCode.trim().length < 3) {
+    fieldErrors.postalCode = 'Introduce un código postal válido.';
+  }
+
+  if (values.country.trim().length < 2) {
+    fieldErrors.country = 'El país de entrega es obligatorio.';
+  }
+
+  const lines = (Object.keys(fieldErrors) as (keyof CheckoutFormValues)[]).map(
+    (key) => `${FIELD_LABELS[key]}: ${fieldErrors[key]}`
+  );
+
+  return {
+    valid: lines.length === 0,
+    fieldErrors,
+    lines
+  };
+}
+
+function formatEur(amount: number): string {
+  return `${amount.toFixed(2).replace('.', ',')} €`;
+}
+
+function parseFirebaseAuthError(err: any): string {
+  const code = err?.code || '';
+  if (code === 'auth/user-not-found') {
+    return 'No existe ninguna cuenta con este correo. Puedes crear una seleccionando "2. Crear una cuenta".';
+  }
+  if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
+    return 'Correo electrónico o contraseña incorrectos. Verifica tus datos.';
+  }
+  if (code === 'auth/email-already-in-use') {
+    return 'Ya existe una cuenta registrada con este correo electrónico. Selecciona "1. Iniciar sesión".';
+  }
+  if (code === 'auth/weak-password') {
+    return 'La contraseña es demasiado débil (mínimo 6 caracteres).';
+  }
+  if (code === 'auth/invalid-email') {
+    return 'El formato del correo electrónico no es válido.';
+  }
+  if (code === 'auth/too-many-requests') {
+    return 'Demasiados intentos consecutivos. Espera unos instantes antes de volver a intentarlo.';
+  }
+  if (code === 'auth/popup-closed-by-user') {
+    return 'Ventana de acceso con Google cerrada antes de finalizar.';
+  }
+  if (code === 'auth/popup-blocked') {
+    return 'Tu navegador bloqueó la ventana emergente de Google. Permítela para continuar.';
+  }
+  if (code === 'auth/operation-not-allowed') {
+    return 'El acceso con correo/contraseña requiere estar habilitado en Firebase Authentication, o accede en 1 clic con Google.';
+  }
+  return err?.message || 'No se pudo completar la autenticación. Inténtalo de nuevo.';
+}
+
+const Stepper: React.FC<{
+  currentStep: number;
+  onSelectStep: (step: number) => void;
+}> = ({ currentStep, onSelectStep }) => {
+  const steps = [
+    { number: 1, name: 'Confirmar Bolsa' },
+    { number: 2, name: 'Tus Datos y Envío' },
+    { number: 3, name: 'Revisión y Pago' }
+  ];
+
+  return (
+    <div className="flex items-center justify-center max-w-2xl mx-auto mb-10 px-2">
+      {steps.map((s, index) => {
+        const isActive = currentStep >= s.number;
+        const isClickable = s.number < currentStep;
+        return (
+          <React.Fragment key={s.number}>
+            <button
+              type="button"
+              disabled={!isClickable}
+              onClick={() => isClickable && onSelectStep(s.number)}
+              className={`flex flex-col items-center group ${
+                isClickable ? 'cursor-pointer' : 'cursor-default'
+              }`}
+            >
+              <div
+                className={`flex items-center justify-center h-10 w-10 rounded-full border-2 text-sm transition-all tabular-nums ${
+                  isActive
+                    ? 'bg-[#0f2d27] border-[#0f2d27] text-white font-bold shadow-xs'
+                    : 'border-neutral-300 text-neutral-400 bg-neutral-50 font-medium'
+                } ${isClickable ? 'group-hover:bg-teal-800 group-hover:border-teal-800' : ''}`}
+              >
+                {currentStep > s.number ? <CheckCircle2 className="w-5 h-5 text-teal-300" /> : s.number}
+              </div>
+              <span
+                className={`mt-2 text-xs tracking-wide whitespace-nowrap ${
+                  isActive ? 'text-neutral-900 font-semibold' : 'text-neutral-400 font-medium'
+                }`}
+              >
+                {s.name}
+              </span>
+            </button>
+            {index < steps.length - 1 && (
+              <div
+                className={`flex-1 h-0.5 mx-3 sm:mx-5 transition-all ${
+                  currentStep > index + 1 ? 'bg-[#0f2d27]' : 'bg-neutral-200'
+                }`}
+              />
+            )}
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+};
+
+export const CheckoutView: React.FC = () => {
+  const {
+    cart,
+    updateCartQuantity,
+    removeFromCart,
+    clearCart,
+    cartSubtotal,
+    volumeDiscount,
+    volumeDiscountPercent,
+    cartDiscount,
+    freeShippingThreshold,
+    appliedPromo,
+    validatePromoCodeAsync,
+    removePromoCode,
+    user,
+    userProfile,
+    isAuthLoading,
+    loginWithEmail,
+    loginWithGoogle,
+    registerWithEmail,
+    sendPasswordReset,
+    logout,
+    updateUserProfile,
+    addOrder,
+    setCurrentView,
+    setIsAccountModalOpen
+  } = useStore();
+  const { setCheckoutData, clearCheckoutData, setPaymentMethod: setContextPaymentMethod } = useCheckout();
+  const { currency, formatPrice, t } = useLocale();
+
+  const totalUnits = useMemo(() => cart.reduce((acc, item) => acc + item.quantity, 0), [cart]);
+
+  const [step, setStep] = useState<number>(1);
+  const [checkoutMode, setCheckoutMode] = useState<'guest' | 'login' | 'register'>('guest');
+
+  // Form values
+  const [formValues, setFormValues] = useState<CheckoutFormValues>({
+    name: '',
+    email: '',
+    phone: '',
+    street: '',
+    city: '',
+    state: '',
+    postalCode: '',
+    country: 'España',
+    saveAddress: true
+  });
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+  const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
+  const [brokenImages, setBrokenImages] = useState<Record<string, boolean>>({});
+
+  // Inline Login state (Step 2)
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [googleLoginLoading, setGoogleLoginLoading] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [resetEmailSent, setResetEmailSent] = useState<string | null>(null);
+
+  // Inline Register state (Step 2)
+  const [registerPassword, setRegisterPassword] = useState('');
+  const [showRegisterPassword, setShowRegisterPassword] = useState(false);
+  const [registerLoading, setRegisterLoading] = useState(false);
+  const [registerError, setRegisterError] = useState<string | null>(null);
+  const [emailExistsConflict, setEmailExistsConflict] = useState(false);
+
+  // Packlink Shipping Quotes
+  const [packlinkQuotes, setPacklinkQuotes] = useState<PacklinkQuote[]>([]);
+  const [selectedQuoteId, setSelectedQuoteId] = useState<string | null>(null);
+  const [packlinkLoading, setPacklinkLoading] = useState(false);
+  const [packlinkSource, setPacklinkSource] = useState<'packlink_live' | 'zonal_fallback' | null>(null);
+  const [packlinkQuoteError, setPacklinkQuoteError] = useState<string | null>(null);
+  const [quotesLoadedKey, setQuotesLoadedKey] = useState<string | null>(null);
+
+  // Step 3 Coupon & Payment state
+  const [couponInput, setCouponInput] = useState('');
+  const [couponLoading, setCouponLoading] = useState(false);
+  const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<'card' | 'bizum'>('card');
+  const [submittingOrder, setSubmittingOrder] = useState(false);
+
+  // Feedback & Error Panels (modeled on reference architecture)
+  const [noticeBanner, setNoticeBanner] = useState<{
+    type: 'success' | 'error' | 'info';
+    title: string;
+    message: string;
+  } | null>(null);
+  const [step2ValidationLines, setStep2ValidationLines] = useState<string[] | null>(null);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
+  const [paymentErrorKind, setPaymentErrorKind] = useState<'gateway' | 'local' | null>(null);
+  const [payStepDetail, setPayStepDetail] = useState<{
+    title: string;
+    items: string[];
+    hint?: string;
+  } | null>(null);
+
+  // Hilow Gateway Modal & Confirmed Order Receipt
+  const [hilowSession, setHilowSession] = useState<{
+    isOpen: boolean;
+    orderId: string;
+    amountInCents: number;
+    productName: string;
+    customerEmail: string;
+    paymentUrl: string;
+    orderObj: Order;
+  } | null>(null);
+  const [completedOrder, setCompletedOrder] = useState<Order | null>(null);
+
+  // Pre-fill form when user or userProfile loads
+  useEffect(() => {
+    if (user) {
+      const addresses: SavedAddress[] = userProfile?.addresses || [];
+      const defaultAddr = addresses.find((a) => a.isDefault) || addresses[0];
+
+      setFormValues((prev) => ({
+        ...prev,
+        email: user.email || prev.email,
+        name: defaultAddr?.name || userProfile?.displayName || user.displayName || prev.name,
+        phone: defaultAddr?.phone || userProfile?.phoneNumber || prev.phone,
+        street: defaultAddr?.street || prev.street,
+        city: defaultAddr?.city || prev.city,
+        state: defaultAddr?.state || defaultAddr?.city || prev.state,
+        postalCode: defaultAddr?.postalCode || prev.postalCode,
+        country: defaultAddr?.country || prev.country || 'España',
+        saveAddress: addresses.length === 0 ? true : prev.saveAddress
+      }));
+
+      if (defaultAddr && !selectedAddressId) {
+        setSelectedAddressId(defaultAddr.id);
+      }
+    }
+  }, [user, userProfile]);
+
+  const showToast = useCallback(
+    (type: 'success' | 'error' | 'info', title: string, message: string) => {
+      setNoticeBanner({ type, title, message });
+    },
+    []
+  );
+
+  const updateField = <K extends keyof CheckoutFormValues>(
+    field: K,
+    value: CheckoutFormValues[K]
+  ) => {
+    setFormValues((prev) => ({ ...prev, [field]: value }));
+    if (fieldErrors[field]) {
+      setFieldErrors((prev) => {
+        const next = { ...prev };
+        delete next[field];
+        return next;
+      });
+    }
+    // If postalCode or country changes, invalidate stale shipping quotes so Step 2 recalculates fresh rates
+    if (field === 'postalCode' || field === 'country') {
+      setPacklinkQuotes([]);
+      setSelectedQuoteId(null);
+      setQuotesLoadedKey(null);
+      setPacklinkQuoteError(null);
+      setPacklinkSource(null);
+    }
+  };
+
+  const handleSelectSavedAddress = (addr: SavedAddress) => {
+    setSelectedAddressId(addr.id);
+    setFormValues((prev) => ({
+      ...prev,
+      name: addr.name,
+      phone: addr.phone,
+      street: addr.street,
+      city: addr.city,
+      state: addr.state || addr.city,
+      postalCode: addr.postalCode,
+      country: addr.country || 'España',
+      saveAddress: false
+    }));
+    setFieldErrors({});
+    setStep2ValidationLines(null);
+    setPacklinkQuotes([]);
+    setSelectedQuoteId(null);
+    setQuotesLoadedKey(null);
+    setPacklinkQuoteError(null);
+    setPacklinkSource(null);
+  };
+
+  const selectedQuote = useMemo(() => {
+    if (!packlinkQuotes.length) return null;
+    return packlinkQuotes.find((q) => q.serviceId === selectedQuoteId) || packlinkQuotes[0];
+  }, [packlinkQuotes, selectedQuoteId]);
+
+  const cheapestQuoteId = useMemo(() => {
+    if (!packlinkQuotes.length) return null;
+    return packlinkQuotes[0].serviceId;
+  }, [packlinkQuotes]);
+
+  const finalTotals = useMemo(() => {
+    const subtotal = Number(cartSubtotal.toFixed(2));
+    const subtotalWithDiscounts = Number(
+      Math.max(0, subtotal - volumeDiscount - cartDiscount).toFixed(2)
+    );
+    const qualifiesForFreeStandard =
+      subtotalWithDiscounts >= freeShippingThreshold ||
+      appliedPromo?.discountType === 'free_shipping';
+
+    // Standard shipping is free when threshold/coupon applies; if user explicitly picks Express upgrade, charge only the quote or upgrade
+    let shippingCost = 0;
+    if (!selectedQuote) {
+      shippingCost = qualifiesForFreeStandard ? 0 : 5.99;
+    } else if (qualifiesForFreeStandard && selectedQuote.serviceId === cheapestQuoteId) {
+      shippingCost = 0;
+    } else {
+      shippingCost = Number(selectedQuote.price.toFixed(2));
+    }
+
+    const total = Number((subtotalWithDiscounts + shippingCost).toFixed(2));
+    const priceInCents = Math.round(total * 100);
+    const estimatedPoints = Math.max(1, Math.floor(total));
+
+    return {
+      subtotal,
+      subtotalWithDiscounts,
+      shippingCost,
+      total,
+      priceInCents,
+      isFreeShipping: shippingCost === 0 && (cart.length > 0 || qualifiesForFreeStandard),
+      qualifiesForFreeStandard,
+      estimatedPoints
+    };
+  }, [
+    cartSubtotal,
+    volumeDiscount,
+    cartDiscount,
+    freeShippingThreshold,
+    appliedPromo,
+    selectedQuote,
+    cheapestQuoteId,
+    cart.length
+  ]);
+
+  const freeShippingRemaining = useMemo(() => {
+    if (appliedPromo?.discountType === 'free_shipping') return 0;
+    return Number(
+      Math.max(0, freeShippingThreshold - finalTotals.subtotalWithDiscounts).toFixed(2)
+    );
+  }, [appliedPromo, freeShippingThreshold, finalTotals.subtotalWithDiscounts]);
+
+  const goToStep = (next: number) => {
+    setPaymentError(null);
+    setPaymentErrorKind(null);
+    setPayStepDetail(null);
+    setStep2ValidationLines(null);
+    setNoticeBanner(null);
+    setStep(next);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  // Inline Login handler (Step 2)
+  const handleInlineLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError(null);
+    setResetEmailSent(null);
+    if (!loginEmail.trim() || !loginPassword) {
+      setLoginError('Introduce tu correo electrónico y tu contraseña.');
+      return;
+    }
+    setLoginLoading(true);
+    try {
+      const loggedUser = await loginWithEmail(loginEmail.trim(), loginPassword);
+      setFormValues((prev) => ({
+        ...prev,
+        email: loggedUser.email || loginEmail.trim(),
+        name: loggedUser.displayName || prev.name
+      }));
+      showToast(
+        'success',
+        'Sesión iniciada correctamente',
+        'Tus datos se han cargado. Verifica tu dirección de entrega y continúa.'
+      );
+    } catch (err: any) {
+      setLoginError(parseFirebaseAuthError(err));
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  // Inline Password Reset inside Step 2 (so user never hits a dead link)
+  const handleInlinePasswordReset = async () => {
+    setLoginError(null);
+    setResetEmailSent(null);
+    if (!loginEmail.trim()) {
+      setLoginError('Escribe primero tu correo electrónico arriba para enviarte el enlace de recuperación.');
+      return;
+    }
+    setLoginLoading(true);
+    try {
+      await sendPasswordReset(loginEmail.trim());
+      setResetEmailSent(
+        `Hemos enviado un enlace para restablecer tu contraseña a ${loginEmail.trim()}.`
+      );
+    } catch (err: any) {
+      setLoginError(parseFirebaseAuthError(err));
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  // Inline 1-Click Google Auth inside Step 2
+  const handleInlineGoogleLogin = async () => {
+    setLoginError(null);
+    setRegisterError(null);
+    setGoogleLoginLoading(true);
+    try {
+      const googleUser = await loginWithGoogle();
+      setFormValues((prev) => ({
+        ...prev,
+        email: googleUser.email || prev.email,
+        name: prev.name || googleUser.displayName || ''
+      }));
+      showToast(
+        'success',
+        'Cuenta de Google conectada',
+        'Revisa tu dirección de envío discreto para continuar al pago.'
+      );
+    } catch (err: any) {
+      const msg = parseFirebaseAuthError(err);
+      setLoginError(msg);
+      if (checkoutMode === 'register') {
+        setRegisterError(msg);
+      }
+    } finally {
+      setGoogleLoginLoading(false);
+    }
+  };
+
+  // Sign out to switch account or buy as guest
+  const handleSignOut = async () => {
+    try {
+      await logout();
+      setSelectedAddressId(null);
+      setFormValues((prev) => ({
+        ...prev,
+        name: '',
+        email: ''
+      }));
+      setCheckoutMode('guest');
+      showToast(
+        'info',
+        'Sesión cerrada',
+        'Ahora puedes finalizar tu pedido como invitado o iniciar sesión con otra cuenta.'
+      );
+    } catch (err) {
+      console.error('Error cerrando sesión en checkout:', err);
+    }
+  };
+
+  const buildShippingQuoteKey = useCallback((postalCode: string, country: string) => {
+    return `${postalCode.trim()}::${country.trim().toUpperCase()}`;
+  }, []);
+
+  const isPostalReadyForQuote = useCallback((postalCode: string, country: string) => {
+    const cleanPostal = postalCode.trim();
+    const cleanCountry = country.trim().toUpperCase();
+    if (!cleanCountry || cleanCountry.length < 2) return false;
+    const isSpain =
+      cleanCountry === 'ESPAÑA' ||
+      cleanCountry === 'ESPANA' ||
+      cleanCountry === 'SPAIN' ||
+      cleanCountry === 'ES';
+    return isSpain ? /^\d{5}$/.test(cleanPostal) : cleanPostal.length >= 3;
+  }, []);
+
+  // Calculate Packlink shipping rates
+  const calculateShippingRate = useCallback(
+    async (
+      values: { postalCode: string; country: string },
+      options?: { silentErrorToast?: boolean }
+    ): Promise<boolean> => {
+      const requestKey = buildShippingQuoteKey(values.postalCode, values.country);
+      setPacklinkLoading(true);
+      setPacklinkQuoteError(null);
+      try {
+        const result = await getPacklinkShippingQuotes({
+          postalCode: values.postalCode,
+          country: values.country
+        });
+
+        if (!result.success || !result.quotes?.length) {
+          throw new Error(
+            result.message || 'No se encontraron tarifas de mensajería para este código postal.'
+          );
+        }
+
+        const validQuotes = result.quotes.filter(
+          (q) => Number.isFinite(q.price) && q.price >= 0
+        );
+        const payableQuotes = !finalTotals.qualifiesForFreeStandard
+          ? validQuotes.filter((q) => q.price > 0)
+          : validQuotes;
+        if (!payableQuotes.length) {
+          throw new Error('No se pudo obtener una tarifa válida para el destino indicado.');
+        }
+
+        setPacklinkQuotes(payableQuotes);
+        setPacklinkSource(result.source || null);
+        setQuotesLoadedKey(requestKey);
+        setSelectedQuoteId((prev) =>
+          prev && payableQuotes.some((q) => q.serviceId === prev)
+            ? prev
+            : payableQuotes[0].serviceId
+        );
+        return true;
+      } catch (err: any) {
+        const msg = err?.message || 'No se pudo calcular el coste de envío.';
+        setPacklinkQuoteError(msg);
+        if (!options?.silentErrorToast) {
+          setStep2ValidationLines([msg]);
+          showToast('error', 'Error al calcular el envío', msg);
+        }
+        return false;
+      } finally {
+        setPacklinkLoading(false);
+      }
+    },
+    [buildShippingQuoteKey, finalTotals.qualifiesForFreeStandard, showToast]
+  );
+
+  // Auto-load Packlink shipping options inside Step 2 as soon as destination Postal Code & Country are valid
+  useEffect(() => {
+    if (step !== 2) return;
+    if (!isPostalReadyForQuote(formValues.postalCode, formValues.country)) return;
+    const targetKey = buildShippingQuoteKey(formValues.postalCode, formValues.country);
+    if (quotesLoadedKey === targetKey && packlinkQuotes.length > 0) return;
+
+    const timer = window.setTimeout(() => {
+      void calculateShippingRate(
+        { postalCode: formValues.postalCode, country: formValues.country },
+        { silentErrorToast: true }
+      );
+    }, 450);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    step,
+    formValues.postalCode,
+    formValues.country,
+    quotesLoadedKey,
+    packlinkQuotes.length,
+    isPostalReadyForQuote,
+    buildShippingQuoteKey,
+    calculateShippingRate
+  ]);
+
+  // Step 1 -> Step 2
+  const handleContinueFromStep1 = () => {
+    if (cart.length === 0) {
+      showToast('error', 'Tu bolsa está vacía', 'Añade al menos una prenda antes de tramitar el pedido.');
+      return;
+    }
+    goToStep(2);
+  };
+
+  // Step 2 -> Step 3 (Validate + optional Account Creation + Packlink quote)
+  const handleContinueFromStep2 = async () => {
+    setStep2ValidationLines(null);
+    setRegisterError(null);
+    setEmailExistsConflict(false);
+    setNoticeBanner(null);
+
+    if (!user && checkoutMode === 'login') {
+      setLoginError('Inicia sesión primero con tu correo o con Google, o selecciona "Comprar como invitado".');
+      showToast(
+        'error',
+        'Inicia sesión para continuar',
+        'Pulsa en "Iniciar sesión y cargar mis datos" o elige otra modalidad.'
+      );
+      return;
+    }
+
+    const validation = validateCheckoutValues(formValues);
+    if (!validation.valid) {
+      setFieldErrors(validation.fieldErrors);
+      setStep2ValidationLines(validation.lines);
+      showToast(
+        'error',
+        'Revisa los datos de envío',
+        validation.lines[0] || 'Completa todos los campos obligatorios.'
+      );
+      return;
+    }
+
+    const primaryAddress: SavedAddress = {
+      id: selectedAddressId || `addr_${Date.now()}`,
+      alias: 'Principal',
+      name: formValues.name.trim(),
+      phone: formValues.phone.trim(),
+      street: formValues.street.trim(),
+      city: formValues.city.trim(),
+      state: formValues.state.trim(),
+      postalCode: formValues.postalCode.trim(),
+      country: formValues.country.trim(),
+      isDefault: true
+    };
+
+    // If user chose "2. Crear una cuenta", register them in Firebase Auth + Firestore now
+    if (!user && checkoutMode === 'register') {
+      if (!registerPassword || registerPassword.length < 6) {
+        const pwdMsg = 'Crea una contraseña de al menos 6 caracteres para tu nueva cuenta.';
+        setRegisterError(pwdMsg);
+        showToast('error', 'Contraseña requerida', pwdMsg);
+        return;
+      }
+
+      setRegisterLoading(true);
+      try {
+        await registerWithEmail(
+          formValues.email.trim(),
+          registerPassword,
+          formValues.name.trim(),
+          {
+            phoneNumber: formValues.phone.trim(),
+            addresses: [primaryAddress]
+          }
+        );
+        showToast(
+          'success',
+          '¡Cuenta creada con éxito!',
+          'Hemos guardado tu dirección y acumularás puntos VIP con este pedido.'
+        );
+      } catch (err: any) {
+        const msg = parseFirebaseAuthError(err);
+        setRegisterError(msg);
+        if (err?.code === 'auth/email-already-in-use') {
+          setEmailExistsConflict(true);
+        }
+        showToast('error', 'No se pudo crear la cuenta', msg);
+        setRegisterLoading(false);
+        return;
+      } finally {
+        setRegisterLoading(false);
+      }
+    } else if (user && formValues.saveAddress) {
+      // Save or update address & phone on existing user's Firestore profile
+      try {
+        const existingAddresses = userProfile?.addresses || [];
+        const withoutDuplicate = existingAddresses
+          .filter(
+            (a) =>
+              a.id !== primaryAddress.id &&
+              !(
+                a.street.toLowerCase() === primaryAddress.street.toLowerCase() &&
+                a.postalCode === primaryAddress.postalCode
+              )
+          )
+          .map((a) => ({ ...a, isDefault: false }));
+
+        await updateUserProfile({
+          displayName: formValues.name.trim(),
+          phoneNumber: formValues.phone.trim(),
+          addresses: [primaryAddress, ...withoutDuplicate].slice(0, 5)
+        });
+      } catch (profileErr) {
+        console.warn('No se pudo actualizar la libreta de direcciones:', profileErr);
+      }
+    }
+
+    const currentQuoteKey = buildShippingQuoteKey(formValues.postalCode, formValues.country);
+    const hasFreshSelection =
+      quotesLoadedKey === currentQuoteKey && packlinkQuotes.length > 0 && Boolean(selectedQuote);
+
+    const shippingOk = hasFreshSelection
+      ? true
+      : await calculateShippingRate(formValues);
+    if (shippingOk) {
+      goToStep(3);
+    }
+  };
+
+  // Apply coupon in Step 3
+  const handleApplyCoupon = useCallback(async () => {
+    const code = couponInput.trim().toUpperCase();
+    if (!code) return;
+    setCouponLoading(true);
+    try {
+      const res = await validatePromoCodeAsync(code);
+      if (!res.success) {
+        showToast('error', 'Cupón no aplicable', res.message);
+      } else {
+        setCouponInput('');
+        showToast('success', 'Cupón aplicado', res.message);
+      }
+    } catch (err: any) {
+      showToast('error', 'Error al validar cupón', err?.message || 'Inténtalo de nuevo.');
+    } finally {
+      setCouponLoading(false);
+    }
+  }, [couponInput, validatePromoCodeAsync, showToast]);
+
+  // Final Submit in Step 3
+  const handleFinalSubmit = async () => {
+    if (cart.length === 0 || finalTotals.total <= 0) {
+      setPayStepDetail({
+        title: 'No se puede procesar el pago',
+        items: ['Tu bolsa de compra está vacía o el importe es 0,00 €.']
+      });
+      return;
+    }
+
+    const validation = validateCheckoutValues(formValues);
+    if (!validation.valid) {
+      setPaymentError(null);
+      setPaymentErrorKind(null);
+      setPayStepDetail({
+        title: 'Faltan datos de entrega obligatorios',
+        items: validation.lines,
+        hint: 'Vuelve al Paso 2 para revisar y completar tu dirección de envío.'
+      });
+      return;
+    }
+
+    if (
+      !finalTotals.isFreeShipping &&
+      (!selectedQuote || !Number.isFinite(selectedQuote.price) || selectedQuote.price <= 0)
+    ) {
+      setPayStepDetail({
+        title: 'Cálculo de envío pendiente',
+        items: ['Vuelve al Paso 2 para confirmar tu código postal y obtener la tarifa de envío.']
+      });
+      return;
+    }
+
+    setSubmittingOrder(true);
+    setPaymentError(null);
+    setPaymentErrorKind(null);
+    setPayStepDetail(null);
+
+    const isGuestOrder = !user;
+    const cleanUid = user ? user.uid : 'guest';
+    const orderId = `CS_${cleanUid}_${Date.now()}`;
+
+    const baseOrder: Order = {
+      id: orderId,
+      userId: user ? user.uid : null,
+      isGuest: isGuestOrder,
+      customerEmail: formValues.email.trim(),
+      customerName: formValues.name.trim(),
+      items: cart.map((item) => ({
+        productId: item.product.id,
+        productName: item.product.name,
+        price: Number(item.product.price) || 0,
+        quantity: Number(item.quantity) || 1,
+        color: item.selectedColor?.name || 'Estándar',
+        size: item.selectedSize || 'Única',
+        image: item.selectedColor?.imageUrl || item.product.images?.[0] || ''
+      })),
+      subtotal: finalTotals.subtotal,
+      volumeDiscount: volumeDiscount > 0 ? volumeDiscount : 0,
+      discount: cartDiscount,
+      shipping: finalTotals.shippingCost,
+      total: finalTotals.total,
+      status: 'pending_payment',
+      paymentMethod: selectedPaymentMethod === 'bizum' ? 'hilow_bizum' : 'hilow_card',
+      shippingAddress: {
+        street: formValues.street.trim(),
+        city: formValues.city.trim(),
+        state: formValues.state.trim(),
+        postalCode: formValues.postalCode.trim(),
+        country: formValues.country.trim(),
+        phone: formValues.phone.trim()
+      },
+      ...(selectedQuote
+        ? {
+            packlink: {
+              serviceId: selectedQuote.serviceId,
+              serviceName: selectedQuote.serviceName,
+              carrierName: selectedQuote.carrierName,
+              quotedPrice: selectedQuote.price,
+              currency: selectedQuote.currency,
+              status: 'quoted'
+            }
+          }
+        : {}),
+      ...(appliedPromo?.code ? { promoCodeApplied: appliedPromo.code } : {}),
+      loyaltyPointsEarned: user ? finalTotals.estimatedPoints : 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    try {
+      const productSummary =
+        cart
+          .map((i) => `${i.quantity}x ${i.product.name}`)
+          .join(', ')
+          .slice(0, 75) || "Pedido Chloe's Secrets World";
+
+      // 1. Recalcular importes en el servidor y crear sesión de pago autoritativa
+      const session = await createHilowPaymentSession({
+        internalOrderId: orderId,
+        amountInCents: finalTotals.priceInCents,
+        productName: productSummary,
+        isSubscription: false,
+        storeUrl: window.location.origin,
+        customerEmail: baseOrder.customerEmail,
+        items: cart.map((item) => ({
+          productId: item.product.id,
+          quantity: Number(item.quantity) || 1,
+          color: item.selectedColor?.name || 'Estándar',
+          size: item.selectedSize || 'Única'
+        })),
+        promoCode: appliedPromo?.code,
+        shippingAddress: {
+          postalCode: formValues.postalCode.trim(),
+          country: formValues.country.trim()
+        },
+        selectedServiceId: selectedQuote?.serviceId
+      });
+
+      const resolvedCheckoutUrl = session.checkoutUrl || session.paymentUrl;
+      if (!session.success || !resolvedCheckoutUrl) {
+        throw new Error(
+          session.message || session.error || 'La pasarela de pago no devolvió una sesión activa.'
+        );
+      }
+
+      // 2. Aplicar precios, envío, cupón y puntos verificados por el servidor al pedido
+      const serverPricing = session.pricing;
+      const verifiedTotal = serverPricing ? serverPricing.total : baseOrder.total;
+      const verifiedOrder: Order = {
+        ...baseOrder,
+        ...(serverPricing
+          ? {
+              items: serverPricing.items.map((srvLine, idx) => ({
+                ...srvLine,
+                image: srvLine.image || baseOrder.items[idx]?.image || ''
+              })),
+              subtotal: serverPricing.subtotal,
+              volumeDiscount: serverPricing.volumeDiscount,
+              discount: serverPricing.discount,
+              shipping: serverPricing.shipping,
+              total: serverPricing.total,
+              ...(serverPricing.appliedPromoCode
+                ? { promoCodeApplied: serverPricing.appliedPromoCode }
+                : {}),
+              ...(serverPricing.verifiedQuote
+                ? {
+                    packlink: {
+                      serviceId: serverPricing.verifiedQuote.serviceId,
+                      serviceName: serverPricing.verifiedQuote.serviceName,
+                      carrierName: serverPricing.verifiedQuote.carrierName,
+                      quotedPrice: serverPricing.verifiedQuote.price,
+                      currency: serverPricing.verifiedQuote.currency,
+                      status: 'quoted'
+                    }
+                  }
+                : {}),
+              loyaltyPointsEarned: user ? Math.max(1, Math.floor(verifiedTotal)) : 0
+            }
+          : {})
+      };
+
+      // 3. Registrar el pedido verificado en Cloud Firestore antes de abrir el pago
+      try {
+        await addOrder(verifiedOrder);
+      } catch (localErr: any) {
+        const rawMsg = localErr?.message || String(localErr);
+        setPaymentErrorKind('local');
+        setPaymentError(
+          'No se pudo registrar el pedido verificado en la base de datos. Verifica tu conexión e inténtalo de nuevo.'
+        );
+        console.error('[Checkout Local Order Error]:', rawMsg);
+        return;
+      }
+
+      const activeMethod = selectedPaymentMethod === 'bizum' ? 'hilow_bizum' : 'hilow_card';
+      setContextPaymentMethod(activeMethod);
+      setCheckoutData({
+        orderId,
+        paymentMethod: activeMethod,
+        orderSummary: verifiedOrder
+      });
+
+      setHilowSession({
+        isOpen: true,
+        orderId,
+        amountInCents: serverPricing?.amountInCents || finalTotals.priceInCents,
+        productName: productSummary,
+        customerEmail: verifiedOrder.customerEmail,
+        paymentUrl: resolvedCheckoutUrl,
+        orderObj: verifiedOrder
+      });
+    } catch (err: any) {
+      const msg = err?.message || 'Error al iniciar el pago con tarjeta / Bizum.';
+      setPaymentErrorKind('gateway');
+      setPaymentError(msg);
+      showToast('error', 'Error en la pasarela de pago', msg);
+    } finally {
+      setSubmittingOrder(false);
+    }
+  };
+
+  // Called when HilowCheckoutModal confirms HMAC webhook payment
+  const handlePaymentVerified = async (orderObj: Order) => {
+    setHilowSession(null);
+
+    if (user && orderObj.loyaltyPointsEarned && orderObj.loyaltyPointsEarned > 0) {
+      try {
+        // Check if server-side webhook already marked order as paid and incremented points
+        let alreadyCreditedByWebhook = false;
+        try {
+          const snap = await getDoc(doc(db, 'orders', orderObj.id));
+          if (snap.exists() && snap.data()?.status === 'paid' && snap.data()?.paidAt) {
+            alreadyCreditedByWebhook = true;
+          }
+        } catch {
+          // Proceed with client fallback if read fails
+        }
+
+        if (!alreadyCreditedByWebhook) {
+          const currentPoints = userProfile?.loyaltyPoints || 0;
+          await updateUserProfile({
+            loyaltyPoints: currentPoints + orderObj.loyaltyPointsEarned
+          });
+        }
+      } catch (ptsErr) {
+        console.warn('No se pudieron actualizar los puntos VIP:', ptsErr);
+      }
+    }
+
+    clearCheckoutData();
+    setCompletedOrder({
+      ...orderObj,
+      status: 'paid'
+    });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  if (isAuthLoading && !user) {
+    return (
+      <div className="min-h-[60vh] flex flex-col items-center justify-center gap-3">
+        <Loader2 className="w-8 h-8 animate-spin text-teal-800" />
+        <p className="text-xs text-neutral-500">Cargando entorno seguro de compra...</p>
+      </div>
+    );
+  }
+
+  // POST-ORDER CONFIRMATION RECEIPT VIEW
+  if (completedOrder) {
+    return (
+      <div className="max-w-3xl mx-auto px-4 sm:px-6 py-12 animate-fadeIn">
+        <div className="bg-white border border-neutral-200 p-8 sm:p-10 shadow-xs">
+          <div className="text-center border-b border-neutral-100 pb-8">
+            <div className="w-16 h-16 rounded-full bg-teal-50 border border-teal-200 flex items-center justify-center mx-auto mb-4 text-teal-800">
+              <CheckCircle2 className="w-9 h-9" />
+            </div>
+            <p className="text-xs font-semibold tracking-widest text-teal-800 uppercase mb-1">
+              Confirmación Oficial de Compra
+            </p>
+            <h1 className="font-serif text-3xl text-neutral-900 font-bold">
+              ¡Gracias por tu pedido, {completedOrder.customerName}!
+            </h1>
+            <p className="text-sm text-neutral-600 mt-2 max-w-lg mx-auto leading-relaxed">
+              Tu pago ha sido verificado y hemos enviado el comprobante detallado a{' '}
+              <strong className="text-neutral-900">{completedOrder.customerEmail}</strong>.
+            </p>
+          </div>
+
+          <div className="py-6 grid grid-cols-1 sm:grid-cols-3 gap-4 border-b border-neutral-100 text-xs">
+            <div>
+              <span className="text-neutral-400 block mb-0.5">Número de Pedido</span>
+              <strong className="font-mono text-neutral-900 text-sm">#{completedOrder.id}</strong>
+            </div>
+            <div>
+              <span className="text-neutral-400 block mb-0.5">Destino Discreto</span>
+              <strong className="text-neutral-900">
+                {completedOrder.shippingAddress.city} ({completedOrder.shippingAddress.postalCode}),{' '}
+                {completedOrder.shippingAddress.country}
+              </strong>
+            </div>
+            <div>
+              <span className="text-neutral-400 block mb-0.5">Estado del Pago</span>
+              <strong className="text-emerald-700">Pagado y Verificado</strong>
+            </div>
+          </div>
+
+          <div className="py-6 space-y-3 border-b border-neutral-100">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-neutral-700">
+              Resumen de Prendas Adquiridas
+            </h2>
+            {completedOrder.items.map((item, idx) => (
+              <div key={idx} className="flex items-center justify-between gap-4 text-xs py-1.5">
+                <div className="flex items-center gap-3 min-w-0">
+                  {item.image ? (
+                    <img
+                      src={item.image}
+                      alt={item.productName}
+                      referrerPolicy="no-referrer"
+                      className="w-12 h-16 object-cover border border-neutral-200 shrink-0"
+                    />
+                  ) : (
+                    <div className="w-12 h-16 bg-neutral-900 text-amber-300 flex items-center justify-center font-serif font-bold text-xs shrink-0">
+                      CS
+                    </div>
+                  )}
+                  <div className="min-w-0">
+                    <p className="font-semibold text-neutral-900 truncate">{item.productName}</p>
+                    <p className="text-neutral-500 mt-0.5">
+                      Color: {item.color} · Talla: {item.size} · Cant.: {item.quantity}
+                    </p>
+                  </div>
+                </div>
+                <span className="font-mono font-semibold text-neutral-900 tabular-nums shrink-0">
+                  {formatPrice(item.price * item.quantity)}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          <div className="py-5 space-y-2 text-xs border-b border-neutral-100 tabular-nums">
+            <div className="flex justify-between text-neutral-600">
+              <span>{t('Subtotal')}</span>
+              <span>{formatPrice(completedOrder.subtotal)}</span>
+            </div>
+            {(completedOrder.volumeDiscount || 0) > 0 && (
+              <div className="flex justify-between text-rose-700">
+                <span>{t('Descuento Pack Volumen')}</span>
+                <span>-{formatPrice(completedOrder.volumeDiscount || 0)}</span>
+              </div>
+            )}
+            {completedOrder.discount > 0 && (
+              <div className="flex justify-between text-rose-700">
+                <span>
+                  {t('Descuento Cupón')}{' '}
+                  {completedOrder.promoCodeApplied ? `(${completedOrder.promoCodeApplied})` : ''}
+                </span>
+                <span>-{formatPrice(completedOrder.discount)}</span>
+              </div>
+            )}
+            <div className="flex justify-between text-neutral-600">
+              <span>
+                {t('Envío Discreto')}
+                {completedOrder.packlink ? ` · ${completedOrder.packlink.carrierName}` : ''}
+              </span>
+              <span>
+                {completedOrder.shipping === 0 ? t('Gratis') : formatPrice(completedOrder.shipping)}
+              </span>
+            </div>
+            <div className="flex justify-between text-base font-bold text-neutral-900 pt-2 border-t border-neutral-200">
+              <span>{t('Total Pagado')}</span>
+              <span className="font-mono">{formatPrice(completedOrder.total)}</span>
+            </div>
+            {currency !== 'EUR' && (
+              <p className="text-[11px] text-neutral-400 text-right">
+                {t('Liquidado en EUR')}: {formatEur(completedOrder.total)}
+              </p>
+            )}
+          </div>
+
+          {user && (completedOrder.loyaltyPointsEarned || 0) > 0 && (
+            <div className="mt-5 p-3.5 bg-teal-50/70 border border-teal-200 text-xs text-teal-900 flex items-center gap-2.5">
+              <Sparkles className="w-4 h-4 text-teal-700 shrink-0" />
+              <span>
+                Has sumado <strong>+{completedOrder.loyaltyPointsEarned} puntos VIP</strong> en tu
+                cuenta de Chloe&apos;s Secrets World.
+              </span>
+            </div>
+          )}
+
+          <div className="mt-8 flex flex-col sm:flex-row gap-3 justify-center">
+            {user && (
+              <button
+                type="button"
+                onClick={() => setIsAccountModalOpen(true)}
+                className="px-6 py-3 border border-neutral-300 hover:border-neutral-900 text-neutral-900 text-xs font-semibold uppercase tracking-wider transition-colors cursor-pointer whitespace-nowrap"
+              >
+                Ver en Mis Pedidos
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setCompletedOrder(null);
+                setCurrentView('catalog');
+              }}
+              className="px-6 py-3 bg-neutral-900 hover:bg-[#0f2d27] text-white text-xs font-semibold uppercase tracking-wider transition-colors cursor-pointer whitespace-nowrap"
+            >
+              Seguir Explorando Colección
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-4xl mx-auto px-4 sm:px-6 py-10 animate-fadeIn">
+      <div className="text-center mb-8">
+        <button
+          type="button"
+          onClick={() => setCurrentView('catalog')}
+          className="inline-flex items-center gap-1.5 text-xs text-neutral-500 hover:text-neutral-900 mb-3 transition-colors cursor-pointer"
+        >
+          <ArrowLeft className="w-3.5 h-3.5" />
+          <span>Volver a la tienda</span>
+        </button>
+        <h1 className="font-serif text-3xl sm:text-4xl text-neutral-900 font-bold">
+          Finalizar Compra Segura
+        </h1>
+        <p className="text-xs text-neutral-500 mt-1.5">
+          Embalaje neutro sin logotipos exteriores · Cifrado bancario SSL 256-bit
+        </p>
+      </div>
+
+      <Stepper currentStep={step} onSelectStep={goToStep} />
+
+      {/* Inline Toast / Notification Banner */}
+      {noticeBanner && (
+        <div
+          className={`mb-6 p-4 border text-xs flex items-start justify-between gap-3 ${
+            noticeBanner.type === 'success'
+              ? 'bg-teal-50/80 border-teal-200 text-teal-950'
+              : noticeBanner.type === 'error'
+              ? 'bg-rose-50 border-rose-200 text-rose-900'
+              : 'bg-neutral-50 border-neutral-200 text-neutral-800'
+          }`}
+        >
+          <div className="flex items-start gap-2.5">
+            {noticeBanner.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-teal-700 shrink-0 mt-0.5" />
+            ) : noticeBanner.type === 'error' ? (
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+            ) : (
+              <Info className="w-4 h-4 text-neutral-600 shrink-0 mt-0.5" />
+            )}
+            <div>
+              <p className="font-bold">{noticeBanner.title}</p>
+              <p className="mt-0.5 opacity-90">{noticeBanner.message}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setNoticeBanner(null)}
+            className="text-current opacity-60 hover:opacity-100 p-0.5 cursor-pointer"
+            aria-label="Cerrar aviso"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Payment Error Banner outside Step 3 */}
+      {paymentError && step !== 3 && (
+        <div className="mb-6 p-4 bg-rose-50 border border-rose-200 text-rose-900 text-xs space-y-2">
+          <div className="flex items-center gap-2 font-bold">
+            <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>
+              {paymentErrorKind === 'local'
+                ? 'Error al registrar el pedido'
+                : 'Incidencia en la pasarela de pago'}
+            </span>
+          </div>
+          <p>{paymentError}</p>
+          <button
+            type="button"
+            onClick={() => {
+              setPaymentError(null);
+              setPaymentErrorKind(null);
+            }}
+            className="px-3 py-1.5 border border-rose-300 text-rose-800 hover:bg-rose-100 font-semibold cursor-pointer"
+          >
+            Descartar aviso
+          </button>
+        </div>
+      )}
+
+      {/* ================================================================= */}
+      {/* PASO 1: CONFIRMACIÓN DE BOLSA DE COMPRA                           */}
+      {/* ================================================================= */}
+      {step === 1 && (
+        <div className="bg-white border border-neutral-200 shadow-xs">
+          <div className="p-6 border-b border-neutral-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h2 className="font-serif text-xl font-bold text-neutral-900">
+                1. Confirma las Prendas de tu Bolsa
+              </h2>
+              <p className="text-xs text-neutral-500 mt-0.5">
+                Revisa tallas, colores y unidades antes de indicar los datos de entrega.
+              </p>
+            </div>
+            <span className="text-xs text-neutral-500 tabular-nums">
+              {totalUnits} {totalUnits === 1 ? 'artículo seleccionado' : 'artículos seleccionados'}
+            </span>
+          </div>
+
+          {/* Free Shipping & Volume Discount Bar */}
+          {cart.length > 0 && (
+            <div className="px-6 py-3 bg-[#f0fdfa] border-b border-teal-100 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-teal-950">
+                <Truck className="w-4 h-4 text-teal-700 shrink-0" />
+                {freeShippingRemaining > 0 ? (
+                  <span>
+                    {t('Te faltan')}{' '}
+                    <strong className="tabular-nums">{formatPrice(freeShippingRemaining)}</strong>{' '}
+                    {t('para conseguir')} <strong>{t('Envío Discreto Gratis')}</strong>.
+                  </span>
+                ) : (
+                  <span className="font-semibold text-teal-900">
+                    {t('¡Tienes Envío Estándar Gratis activado en este pedido!')}
+                  </span>
+                )}
+              </div>
+              <div className="text-neutral-600">
+                {volumeDiscountPercent > 0 ? (
+                  <span className="text-teal-800 font-semibold">
+                    Pack Ahorro aplicado: -{volumeDiscountPercent}% dto. por volumen
+                  </span>
+                ) : (
+                  <span>Añade 2 prendas para -5% dto. · 3+ prendas para -10% dto.</span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {cart.length === 0 ? (
+            <div className="p-14 text-center space-y-4">
+              <ShoppingBag className="w-12 h-12 text-neutral-300 mx-auto" />
+              <h3 className="font-serif text-2xl text-neutral-800">Tu bolsa de compra está vacía</h3>
+              <p className="text-xs text-neutral-500 max-w-sm mx-auto">
+                Descubre nuestras colecciones de alta lencería, corsetería y prendas de descanso.
+              </p>
+              <button
+                type="button"
+                onClick={() => setCurrentView('catalog')}
+                className="px-6 py-3 bg-neutral-900 hover:bg-teal-900 text-white text-xs font-semibold uppercase tracking-wider transition-colors cursor-pointer"
+              >
+                Explorar Catálogo
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="divide-y divide-neutral-100 px-6">
+                {cart.map((item) => {
+                  const imgSrc = item.selectedColor?.imageUrl || item.product.images?.[0] || '';
+                  const imgFailed = brokenImages[item.id] || !imgSrc;
+
+                  return (
+                    <div key={item.id} className="py-5 flex items-center gap-4">
+                      <div className="w-20 h-26 shrink-0 border border-neutral-200 overflow-hidden bg-neutral-100">
+                        {!imgFailed ? (
+                          <img
+                            src={imgSrc}
+                            alt={item.product.name}
+                            referrerPolicy="no-referrer"
+                            onError={() =>
+                              setBrokenImages((prev) => ({ ...prev, [item.id]: true }))
+                            }
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <div className="w-full h-full bg-neutral-900 text-amber-300 flex items-center justify-center font-serif font-bold text-sm">
+                            CS
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex-1 min-w-0">
+                        <h3 className="text-sm font-semibold text-neutral-900 truncate">
+                          {item.product.name}
+                        </h3>
+                        <p className="text-xs text-neutral-500 mt-0.5">
+                          Color: {item.selectedColor.name} · Talla: {item.selectedSize}
+                          {item.selectedLength ? ` · Largo: ${item.selectedLength}` : ''}
+                        </p>
+                        <p className="text-xs text-neutral-500 mt-0.5 tabular-nums">
+                          {t('Precio unitario')}: {formatPrice(item.product.price)}
+                        </p>
+
+                        <div className="flex items-center gap-4 mt-3">
+                          <div className="inline-flex items-center border border-neutral-300 bg-white h-8">
+                            <button
+                              type="button"
+                              onClick={() => updateCartQuantity(item.id, item.quantity - 1)}
+                              className="px-2.5 h-full text-neutral-600 hover:text-neutral-950 hover:bg-neutral-50 transition-colors cursor-pointer"
+                              aria-label="Reducir cantidad"
+                            >
+                              <Minus className="w-3.5 h-3.5" />
+                            </button>
+                            <span className="w-8 text-center text-xs font-mono font-bold tabular-nums">
+                              {item.quantity}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => updateCartQuantity(item.id, item.quantity + 1)}
+                              className="px-2.5 h-full text-neutral-600 hover:text-neutral-950 hover:bg-neutral-50 transition-colors cursor-pointer"
+                              aria-label="Aumentar cantidad"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => removeFromCart(item.id)}
+                            className="inline-flex items-center gap-1 text-xs text-neutral-400 hover:text-rose-600 transition-colors cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Eliminar</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="text-right shrink-0">
+                        <p className="font-mono text-sm font-bold text-neutral-900 tabular-nums">
+                          {formatPrice(item.product.price * item.quantity)}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="p-6 bg-neutral-50 border-t border-neutral-200 space-y-2.5 text-sm tabular-nums">
+                <div className="flex justify-between text-neutral-600">
+                  <span>{t('Subtotal artículos')}</span>
+                  <span>{formatPrice(finalTotals.subtotal)}</span>
+                </div>
+                {volumeDiscount > 0 && (
+                  <div className="flex justify-between text-rose-700 font-medium">
+                    <span>{t('Descuento Pack Volumen')} (-{volumeDiscountPercent}%)</span>
+                    <span>-{formatPrice(volumeDiscount)}</span>
+                  </div>
+                )}
+                {cartDiscount > 0 && appliedPromo && (
+                  <div className="flex justify-between text-teal-800 font-medium">
+                    <span>{t('Cupón aplicado')} ({appliedPromo.code})</span>
+                    <span>-{formatPrice(cartDiscount)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between text-xs text-neutral-500 pt-1">
+                  <span>{t('Gastos de envío')}</span>
+                  <span>
+                    {finalTotals.qualifiesForFreeStandard
+                      ? t('Gratis (calculado en el siguiente paso)')
+                      : t('Se calcula según tu Código Postal en el Paso 2')}
+                  </span>
+                </div>
+                <div className="border-t border-neutral-200 pt-3 flex justify-between items-baseline font-bold text-lg text-neutral-900">
+                  <span>{t('Total provisional')}</span>
+                  <span className="font-mono">{formatPrice(finalTotals.subtotalWithDiscounts)}</span>
+                </div>
+                {currency !== 'EUR' && (
+                  <p className="text-[11px] text-neutral-500 text-right">
+                    {t('Importe aprox. · La pasarela cobra en EUR')} ({formatEur(finalTotals.subtotalWithDiscounts)})
+                  </p>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ================================================================= */}
+      {/* PASO 2: TUS DATOS Y ENVÍO (LOGIN / CREAR CUENTA / INVITADO)       */}
+      {/* ================================================================= */}
+      {step === 2 && (
+        <div className="bg-white border border-neutral-200 shadow-xs">
+          <div className="p-6 border-b border-neutral-200">
+            <h2 className="font-serif text-2xl font-bold text-neutral-900">
+              2. Tus Datos de Entrega
+            </h2>
+            <p className="text-xs text-neutral-500 mt-1">
+              {user
+                ? 'Has iniciado sesión con tu cuenta. Revisa o edita la dirección donde recibirás tu pedido.'
+                : 'Elige cómo deseas tramitar tu pedido: iniciar sesión, crear una cuenta VIP o comprar rápidamente como invitado.'}
+            </p>
+          </div>
+
+          <div className="p-6 space-y-6">
+            {/* IF USER IS SIGNED IN */}
+            {user ? (
+              <div className="space-y-4">
+                <div className="border border-teal-200 bg-teal-50/40 p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="h-10 w-10 rounded-full bg-[#0f2d27] text-white flex items-center justify-center font-bold shrink-0">
+                      <User className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <p className="font-semibold text-sm text-neutral-900">
+                          {userProfile?.displayName || user.displayName || user.email}
+                        </p>
+                        <span className="text-xs text-teal-800 font-medium">
+                          · Cuenta Activa ({userProfile?.loyaltyPoints || 0} pts VIP)
+                        </span>
+                      </div>
+                      <p className="text-xs text-neutral-600 flex items-center gap-1.5 mt-0.5">
+                        <Sparkles className="h-3.5 w-3.5 text-amber-600 shrink-0" />
+                        <span>
+                          Este pedido quedará guardado en tu historial y sumará{' '}
+                          <strong>+{finalTotals.estimatedPoints} puntos VIP</strong>.
+                        </span>
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleSignOut}
+                    className="px-3 py-2 border border-neutral-300 bg-white hover:bg-neutral-50 text-xs font-medium text-neutral-700 flex items-center gap-1.5 shrink-0 cursor-pointer whitespace-nowrap"
+                  >
+                    <LogOut className="h-3.5 w-3.5" />
+                    <span>Cambiar / Comprar como invitado</span>
+                  </button>
+                </div>
+
+                {/* Saved Addresses Selector */}
+                {userProfile?.addresses && userProfile.addresses.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-xs font-semibold text-neutral-700">
+                      Mis direcciones guardadas:
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {userProfile.addresses.map((addr) => {
+                        const active = selectedAddressId === addr.id;
+                        return (
+                          <button
+                            key={addr.id}
+                            type="button"
+                            onClick={() => handleSelectSavedAddress(addr)}
+                            className={`p-3.5 border text-left text-xs transition-all cursor-pointer ${
+                              active
+                                ? 'border-teal-800 bg-teal-50/40 ring-1 ring-teal-800'
+                                : 'border-neutral-200 hover:border-neutral-400 bg-white'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between font-bold text-neutral-900 mb-1">
+                              <span className="flex items-center gap-1.5">
+                                <MapPin className="w-3.5 h-3.5 text-teal-800" />
+                                {addr.alias || 'Dirección guardada'}
+                              </span>
+                              {addr.isDefault && (
+                                <span className="text-[11px] font-medium text-teal-800">
+                                  Predeterminada
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-neutral-700 truncate">{addr.street}</p>
+                            <p className="text-neutral-500">
+                              {addr.postalCode} {addr.city} ({addr.country}) · {addr.phone}
+                            </p>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              /* IF NOT SIGNED IN: 3-MODE SELECTOR */
+              <div className="space-y-6">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  {/* Option 1: Login */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCheckoutMode('login');
+                      setStep2ValidationLines(null);
+                      setLoginError(null);
+                    }}
+                    className={`flex flex-col items-start p-4 border-2 transition-all text-left cursor-pointer ${
+                      checkoutMode === 'login'
+                        ? 'border-[#0f2d27] bg-teal-50/40'
+                        : 'border-neutral-200 hover:border-neutral-400 bg-white'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 mb-1.5 font-bold text-sm text-neutral-900">
+                      <LogIn className="h-4 w-4 text-teal-800 shrink-0" />
+                      <span>1. Iniciar sesión</span>
+                    </div>
+                    <p className="text-xs text-neutral-500 leading-relaxed">
+                      Carga tus direcciones guardadas y acumula puntos de fidelidad VIP.
+                    </p>
+                  </button>
+
+                  {/* Option 2: Create Account */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCheckoutMode('register');
+                      setStep2ValidationLines(null);
+                      setRegisterError(null);
+                    }}
+                    className={`flex flex-col items-start p-4 border-2 transition-all text-left cursor-pointer ${
+                      checkoutMode === 'register'
+                        ? 'border-[#0f2d27] bg-teal-50/40'
+                        : 'border-neutral-200 hover:border-neutral-400 bg-white'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 mb-1.5 font-bold text-sm text-neutral-900">
+                      <UserPlus className="h-4 w-4 text-teal-800 shrink-0" />
+                      <span>2. Crear una cuenta</span>
+                    </div>
+                    <p className="text-xs text-neutral-500 leading-relaxed">
+                      Guarda tu perfil con este pedido y suma +{finalTotals.estimatedPoints} puntos VIP.
+                    </p>
+                  </button>
+
+                  {/* Option 3: Guest Checkout */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCheckoutMode('guest');
+                      setStep2ValidationLines(null);
+                    }}
+                    className={`flex flex-col items-start p-4 border-2 transition-all text-left cursor-pointer ${
+                      checkoutMode === 'guest'
+                        ? 'border-[#0f2d27] bg-teal-50/40'
+                        : 'border-neutral-200 hover:border-neutral-400 bg-white'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 mb-1.5 font-bold text-sm text-neutral-900">
+                      <UserCheck className="h-4 w-4 text-teal-800 shrink-0" />
+                      <span>3. Comprar como invitado</span>
+                    </div>
+                    <p className="text-xs text-neutral-500 leading-relaxed">
+                      Sin contraseña. Solo los datos imprescindibles para enviar tu pedido.
+                    </p>
+                  </button>
+                </div>
+
+                {/* INLINE LOGIN VIEW */}
+                {checkoutMode === 'login' && (
+                  <div className="border border-neutral-200 p-5 bg-neutral-50/50 space-y-4">
+                    <div className="flex items-center gap-2 font-semibold text-sm text-neutral-900">
+                      <LogIn className="h-4 w-4 text-teal-800" />
+                      <h3>Accede a tu cuenta existente</h3>
+                    </div>
+                    <p className="text-xs text-neutral-600">
+                      Conéctate con Google en un clic o introduce tu correo y contraseña para cargar tu libreta de direcciones.
+                    </p>
+
+                    {loginError && (
+                      <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2">
+                        <AlertTriangle className="h-4 w-4 text-rose-600 shrink-0 mt-0.5" />
+                        <span>{loginError}</span>
+                      </div>
+                    )}
+
+                    {resetEmailSent && (
+                      <div className="p-3 bg-teal-50 border border-teal-200 text-teal-900 text-xs flex items-start gap-2">
+                        <CheckCircle2 className="h-4 w-4 text-teal-700 shrink-0 mt-0.5" />
+                        <span>{resetEmailSent}</span>
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={handleInlineGoogleLogin}
+                      disabled={loginLoading || googleLoginLoading}
+                      className="w-full py-2.5 px-4 border border-neutral-300 bg-white hover:bg-neutral-50 text-neutral-900 text-xs font-semibold uppercase tracking-wider flex items-center justify-center gap-2.5 transition-colors disabled:opacity-50 cursor-pointer"
+                    >
+                      {googleLoginLoading ? (
+                        <Loader2 className="w-4 h-4 animate-spin text-teal-800" />
+                      ) : (
+                        <svg className="w-4 h-4" viewBox="0 0 24 24">
+                          <path
+                            fill="#4285F4"
+                            d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                          />
+                          <path
+                            fill="#34A853"
+                            d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                          />
+                          <path
+                            fill="#FBBC05"
+                            d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
+                          />
+                          <path
+                            fill="#EA4335"
+                            d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
+                          />
+                        </svg>
+                      )}
+                      <span>
+                        {googleLoginLoading ? 'Conectando con Google...' : 'Continuar con Google'}
+                      </span>
+                    </button>
+
+                    <div className="relative py-1">
+                      <div className="absolute inset-0 flex items-center">
+                        <span className="w-full border-t border-neutral-200" />
+                      </div>
+                      <div className="relative flex justify-center text-[11px] uppercase">
+                        <span className="bg-neutral-50 px-3 text-neutral-400">
+                          o con tu correo electrónico
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-semibold text-neutral-700 mb-1">
+                          Correo electrónico
+                        </label>
+                        <input
+                          type="email"
+                          placeholder="tu@correo.com"
+                          value={loginEmail}
+                          onChange={(e) => setLoginEmail(e.target.value)}
+                          disabled={loginLoading || googleLoginLoading}
+                          className="w-full border border-neutral-300 bg-white px-3 py-2 text-xs outline-none focus:border-teal-800"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between items-center mb-1">
+                          <label className="text-xs font-semibold text-neutral-700">
+                            Contraseña
+                          </label>
+                          <button
+                            type="button"
+                            onClick={handleInlinePasswordReset}
+                            className="text-[11px] text-teal-800 hover:underline cursor-pointer"
+                          >
+                            ¿Olvidaste tu contraseña?
+                          </button>
+                        </div>
+                        <div className="relative">
+                          <input
+                            type={showLoginPassword ? 'text' : 'password'}
+                            placeholder="••••••••"
+                            value={loginPassword}
+                            onChange={(e) => setLoginPassword(e.target.value)}
+                            disabled={loginLoading || googleLoginLoading}
+                            className="w-full border border-neutral-300 bg-white px-3 py-2 pr-9 text-xs outline-none focus:border-teal-800"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowLoginPassword(!showLoginPassword)}
+                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-700 cursor-pointer"
+                          >
+                            {showLoginPassword ? (
+                              <EyeOff className="h-4 w-4" />
+                            ) : (
+                              <Eye className="h-4 w-4" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row items-center gap-3 pt-1">
+                      <button
+                        type="button"
+                        onClick={handleInlineLogin}
+                        disabled={loginLoading || googleLoginLoading}
+                        className="w-full sm:w-auto px-5 py-2.5 bg-neutral-900 hover:bg-[#0f2d27] text-white text-xs font-semibold uppercase tracking-wider flex items-center justify-center gap-2 transition-colors disabled:opacity-50 cursor-pointer whitespace-nowrap"
+                      >
+                        {loginLoading ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <LogIn className="h-4 w-4" />
+                        )}
+                        <span>Iniciar sesión y cargar mis datos</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCheckoutMode('guest')}
+                        className="text-xs text-neutral-500 hover:text-neutral-900 underline cursor-pointer"
+                      >
+                        Prefiero continuar como invitado
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* INLINE REGISTER INFO BANNER */}
+                {checkoutMode === 'register' && (
+                  <div className="space-y-3">
+                    <div className="p-4 border border-teal-200 bg-teal-50/40 text-xs text-teal-950 flex items-start gap-2.5">
+                      <Sparkles className="h-4 w-4 text-teal-800 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-bold">
+                          Tu cuenta se creará automáticamente al completar este paso
+                        </p>
+                        <p className="mt-0.5 text-neutral-600">
+                          Elige una contraseña más abajo junto a tu dirección de envío, o crea tu cuenta en un solo clic con Google.
+                        </p>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleInlineGoogleLogin}
+                      disabled={googleLoginLoading}
+                      className="w-full py-2.5 px-4 border border-neutral-300 bg-white hover:bg-neutral-50 text-neutral-900 text-xs font-semibold uppercase tracking-wider flex items-center justify-center gap-2.5 transition-colors disabled:opacity-50 cursor-pointer"
+                    >
+                      {googleLoginLoading ? (
+                        <Loader2 className="w-4 h-4 animate-spin text-teal-800" />
+                      ) : (
+                        <svg className="w-4 h-4" viewBox="0 0 24 24">
+                          <path
+                            fill="#4285F4"
+                            d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                          />
+                          <path
+                            fill="#34A853"
+                            d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                          />
+                          <path
+                            fill="#FBBC05"
+                            d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
+                          />
+                          <path
+                            fill="#EA4335"
+                            d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
+                          />
+                        </svg>
+                      )}
+                      <span>Crear cuenta rápida con Google</span>
+                    </button>
+                  </div>
+                )}
+
+                {/* GUEST CHECKOUT INFO BANNER */}
+                {checkoutMode === 'guest' && (
+                  <div className="p-4 border border-neutral-200 bg-neutral-50 text-xs text-neutral-600 flex items-start gap-2.5">
+                    <Info className="h-4 w-4 text-neutral-500 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="font-semibold text-neutral-900">Compra Rápida como Invitado</p>
+                      <p className="mt-0.5">
+                        No necesitas recordar ninguna contraseña. Introduce tus datos únicamente para la entrega confidencial y el envío de tu factura por email.
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* STEP 2 VALIDATION SUMMARY ALERT */}
+            {step2ValidationLines && step2ValidationLines.length > 0 && (
+              <div className="p-4 bg-rose-50 border border-rose-200 text-rose-900 text-xs">
+                <div className="flex items-center gap-2 font-bold mb-1.5">
+                  <AlertTriangle className="h-4 w-4 text-rose-600 shrink-0" />
+                  <span>Por favor, revisa los siguientes campos antes de continuar:</span>
+                </div>
+                <ul className="list-disc pl-5 space-y-1 text-rose-800">
+                  {step2ValidationLines.map((line, i) => (
+                    <li key={i}>{line}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* SHIPPING DETAILS FORM */}
+            {(user || checkoutMode === 'guest' || checkoutMode === 'register') && (
+              <div className="space-y-4 pt-2 border-t border-neutral-100">
+                <h3 className="font-serif text-lg font-bold text-neutral-900 flex items-center gap-2">
+                  <UserCheck className="h-5 w-5 text-teal-800" />
+                  <span>
+                    {checkoutMode === 'register' && !user
+                      ? 'Datos de tu Cuenta y Dirección de Entrega'
+                      : 'Dirección de Entrega Confidencial y Contacto'}
+                  </span>
+                </h3>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                  {/* Full Name */}
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">
+                      Nombre y Apellidos *
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Ej. Sofía Martínez"
+                      value={formValues.name}
+                      onChange={(e) => updateField('name', e.target.value)}
+                      className={`w-full border px-3 py-2.5 outline-none transition-colors ${
+                        fieldErrors.name
+                          ? 'border-rose-500 bg-rose-50/30'
+                          : 'border-neutral-300 focus:border-teal-800'
+                      }`}
+                    />
+                    {fieldErrors.name && (
+                      <p className="text-[11px] text-rose-600 mt-1">{fieldErrors.name}</p>
+                    )}
+                  </div>
+
+                  {/* Email */}
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">
+                      Correo Electrónico *
+                    </label>
+                    <div className="relative">
+                      <Mail className="w-4 h-4 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="email"
+                        autoComplete="email"
+                        placeholder="sofia@ejemplo.com"
+                        value={formValues.email}
+                        onChange={(e) => updateField('email', e.target.value)}
+                        disabled={Boolean(user)}
+                        className={`w-full border pl-9 pr-3 py-2.5 outline-none transition-colors ${
+                          user
+                            ? 'bg-neutral-100 text-neutral-500 border-neutral-200 cursor-not-allowed'
+                            : fieldErrors.email
+                            ? 'border-rose-500 bg-rose-50/30'
+                            : 'border-neutral-300 focus:border-teal-800'
+                        }`}
+                      />
+                    </div>
+                    {fieldErrors.email && (
+                      <p className="text-[11px] text-rose-600 mt-1">{fieldErrors.email}</p>
+                    )}
+                  </div>
+
+                  {/* Password field when creating account */}
+                  {!user && checkoutMode === 'register' && (
+                    <div className="md:col-span-2 p-4 border border-neutral-200 bg-neutral-50/60 space-y-2">
+                      <div className="flex justify-between items-center">
+                        <label className="font-semibold text-neutral-800">
+                          Contraseña para tu nueva cuenta *
+                        </label>
+                        <span className="text-[11px] text-neutral-500">Mínimo 6 caracteres</span>
+                      </div>
+                      <div className="relative">
+                        <input
+                          type={showRegisterPassword ? 'text' : 'password'}
+                          placeholder="Crea una contraseña segura"
+                          value={registerPassword}
+                          onChange={(e) => setRegisterPassword(e.target.value)}
+                          disabled={registerLoading}
+                          className="w-full border border-neutral-300 bg-white px-3 py-2.5 pr-10 outline-none focus:border-teal-800"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowRegisterPassword(!showRegisterPassword)}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-700 cursor-pointer"
+                        >
+                          {showRegisterPassword ? (
+                            <EyeOff className="h-4 w-4" />
+                          ) : (
+                            <Eye className="h-4 w-4" />
+                          )}
+                        </button>
+                      </div>
+                      {registerError && (
+                        <div className="text-xs text-rose-700 font-medium flex flex-wrap items-center gap-2 pt-1">
+                          <span>{registerError}</span>
+                          {emailExistsConflict && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setLoginEmail(formValues.email.trim());
+                                setCheckoutMode('login');
+                              }}
+                              className="underline font-bold text-teal-900 cursor-pointer"
+                            >
+                              Iniciar sesión con este correo &rarr;
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Phone */}
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">
+                      Teléfono Móvil (Avisos de mensajería) *
+                    </label>
+                    <input
+                      type="tel"
+                      placeholder="+34 600 000 000"
+                      value={formValues.phone}
+                      onChange={(e) => updateField('phone', e.target.value)}
+                      className={`w-full border px-3 py-2.5 outline-none transition-colors font-mono ${
+                        fieldErrors.phone
+                          ? 'border-rose-500 bg-rose-50/30'
+                          : 'border-neutral-300 focus:border-teal-800'
+                      }`}
+                    />
+                    {fieldErrors.phone && (
+                      <p className="text-[11px] text-rose-600 mt-1">{fieldErrors.phone}</p>
+                    )}
+                  </div>
+
+                  {/* Country */}
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">
+                      País de Entrega *
+                    </label>
+                    <select
+                      value={formValues.country}
+                      onChange={(e) => updateField('country', e.target.value)}
+                      className="w-full border border-neutral-300 bg-white px-3 py-2.5 outline-none focus:border-teal-800"
+                    >
+                      <option value="España">España</option>
+                      <option value="Portugal">Portugal</option>
+                      <option value="Andorra">Andorra</option>
+                      <option value="Francia">Francia</option>
+                      <option value="Italia">Italia</option>
+                      <option value="Alemania">Alemania</option>
+                      <option value="Bélgica">Bélgica</option>
+                      <option value="Países Bajos">Países Bajos</option>
+                      <option value="Reino Unido">Reino Unido</option>
+                      <option value="Irlanda">Irlanda</option>
+                      <option value="Suiza">Suiza</option>
+                    </select>
+                    {fieldErrors.country && (
+                      <p className="text-[11px] text-rose-600 mt-1">{fieldErrors.country}</p>
+                    )}
+                  </div>
+
+                  {/* Street */}
+                  <div className="md:col-span-2">
+                    <label className="block font-semibold text-neutral-700 mb-1">
+                      Dirección Completa (Calle, número, piso, puerta) *
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Calle Serrano 24, 3º Derecha"
+                      value={formValues.street}
+                      onChange={(e) => updateField('street', e.target.value)}
+                      className={`w-full border px-3 py-2.5 outline-none transition-colors ${
+                        fieldErrors.street
+                          ? 'border-rose-500 bg-rose-50/30'
+                          : 'border-neutral-300 focus:border-teal-800'
+                      }`}
+                    />
+                    {fieldErrors.street && (
+                      <p className="text-[11px] text-rose-600 mt-1">{fieldErrors.street}</p>
+                    )}
+                  </div>
+
+                  {/* City */}
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">Ciudad *</label>
+                    <input
+                      type="text"
+                      placeholder="Madrid"
+                      value={formValues.city}
+                      onChange={(e) => updateField('city', e.target.value)}
+                      className={`w-full border px-3 py-2.5 outline-none transition-colors ${
+                        fieldErrors.city
+                          ? 'border-rose-500 bg-rose-50/30'
+                          : 'border-neutral-300 focus:border-teal-800'
+                      }`}
+                    />
+                    {fieldErrors.city && (
+                      <p className="text-[11px] text-rose-600 mt-1">{fieldErrors.city}</p>
+                    )}
+                  </div>
+
+                  {/* State / Province */}
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">
+                      Provincia / Estado *
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Comunidad de Madrid"
+                      value={formValues.state}
+                      onChange={(e) => updateField('state', e.target.value)}
+                      className={`w-full border px-3 py-2.5 outline-none transition-colors ${
+                        fieldErrors.state
+                          ? 'border-rose-500 bg-rose-50/30'
+                          : 'border-neutral-300 focus:border-teal-800'
+                      }`}
+                    />
+                    {fieldErrors.state && (
+                      <p className="text-[11px] text-rose-600 mt-1">{fieldErrors.state}</p>
+                    )}
+                  </div>
+
+                  {/* Postal Code */}
+                  <div>
+                    <label className="block font-semibold text-neutral-700 mb-1">
+                      Código Postal *
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="28001"
+                      value={formValues.postalCode}
+                      onChange={(e) => updateField('postalCode', e.target.value)}
+                      className={`w-full border px-3 py-2.5 outline-none transition-colors font-mono ${
+                        fieldErrors.postalCode
+                          ? 'border-rose-500 bg-rose-50/30'
+                          : 'border-neutral-300 focus:border-teal-800'
+                      }`}
+                    />
+                    {fieldErrors.postalCode && (
+                      <p className="text-[11px] text-rose-600 mt-1">{fieldErrors.postalCode}</p>
+                    )}
+                  </div>
+
+                  {/* Save address checkbox for signed-in users */}
+                  {user && (
+                    <div className="flex items-center pt-6">
+                      <label className="inline-flex items-center gap-2 cursor-pointer text-neutral-700 select-none">
+                        <input
+                          type="checkbox"
+                          checked={formValues.saveAddress}
+                          onChange={(e) => updateField('saveAddress', e.target.checked)}
+                          className="w-4 h-4 accent-[#0f2d27]"
+                        />
+                        <span>Guardar esta dirección como predeterminada en mi cuenta</span>
+                      </label>
+                    </div>
+                  )}
+                </div>
+
+                {/* Live Selectable Courier Options right in Step 2 */}
+                <div className="pt-4 mt-4 border-t border-neutral-100 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h4 className="text-xs font-bold uppercase tracking-wider text-neutral-800 flex items-center gap-1.5">
+                        <Truck className="w-4 h-4 text-teal-800" />
+                        <span>Opciones de Envío Discreto (Elige tu Transportista)</span>
+                      </h4>
+                      <p className="text-[11px] text-neutral-500 mt-0.5">
+                        {packlinkSource === 'packlink_live'
+                          ? 'Tarifas en vivo desde Packlink PRO según tu código postal y características de entrega.'
+                          : 'Introduce tu código postal para ver las opciones disponibles con seguimiento y embalaje 100% neutro.'}
+                      </p>
+                    </div>
+                    {isPostalReadyForQuote(formValues.postalCode, formValues.country) && (
+                      <button
+                        type="button"
+                        disabled={packlinkLoading}
+                        onClick={() =>
+                          void calculateShippingRate({
+                            postalCode: formValues.postalCode,
+                            country: formValues.country
+                          })
+                        }
+                        className="px-3 py-1.5 border border-neutral-300 bg-white hover:border-neutral-900 text-[11px] font-semibold text-neutral-800 cursor-pointer disabled:opacity-50"
+                      >
+                        {packlinkLoading ? 'Consultando...' : 'Actualizar opciones'}
+                      </button>
+                    )}
+                  </div>
+
+                  {!isPostalReadyForQuote(formValues.postalCode, formValues.country) ? (
+                    <div className="p-3.5 bg-neutral-50 border border-neutral-200 text-xs text-neutral-600 flex items-center gap-2">
+                      <Info className="w-4 h-4 text-neutral-400 shrink-0" />
+                      <span>
+                        Escribe tu país y código postal completo para mostrar los transportistas disponibles y sus características.
+                      </span>
+                    </div>
+                  ) : packlinkLoading && packlinkQuotes.length === 0 ? (
+                    <div className="p-4 bg-neutral-50 border border-neutral-200 text-xs text-neutral-700 flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin text-teal-800 shrink-0" />
+                      <span>Buscando mejores opciones de mensajería para el CP {formValues.postalCode}...</span>
+                    </div>
+                  ) : packlinkQuoteError && packlinkQuotes.length === 0 ? (
+                    <div className="p-3.5 bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-center justify-between gap-2">
+                      <span>{packlinkQuoteError}</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void calculateShippingRate({
+                            postalCode: formValues.postalCode,
+                            country: formValues.country
+                          })
+                        }
+                        className="underline font-bold shrink-0 cursor-pointer"
+                      >
+                        Reintentar
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {packlinkQuotes.map((quote) => {
+                        const isSelected = selectedQuote?.serviceId === quote.serviceId;
+                        const isFreeOption =
+                          finalTotals.qualifiesForFreeStandard && quote.serviceId === cheapestQuoteId;
+                        const isHomeDelivery = quote.homeDelivery !== false && !quote.requiresDropoffPoint;
+
+                        return (
+                          <button
+                            key={quote.serviceId}
+                            type="button"
+                            onClick={() => setSelectedQuoteId(quote.serviceId)}
+                            className={`p-3.5 border text-left transition-all cursor-pointer flex flex-col justify-between gap-2 ${
+                              isSelected
+                                ? 'border-[#0f2d27] bg-teal-50/40 ring-1 ring-[#0f2d27]'
+                                : 'border-neutral-200 hover:border-neutral-400 bg-white'
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <p className="font-bold text-xs text-neutral-900 truncate">
+                                  {quote.carrierName}
+                                </p>
+                                <p className="text-[11px] text-neutral-700 font-medium leading-snug">
+                                  {quote.serviceName}
+                                </p>
+                              </div>
+                              <div className="text-right shrink-0 font-mono text-xs font-bold tabular-nums">
+                                {isFreeOption ? (
+                                  <div>
+                                    <span className="text-emerald-700 block">{t('GRATIS')}</span>
+                                    {quote.price > 0 && (
+                                      <span className="text-[10px] text-neutral-400 line-through font-normal">
+                                        {formatPrice(quote.price)}
+                                      </span>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <span className="text-neutral-900">{formatPrice(quote.price)}</span>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                              <span
+                                className={`px-1.5 py-0.5 rounded font-semibold ${
+                                  isHomeDelivery
+                                    ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                                    : 'bg-amber-50 text-amber-800 border border-amber-200'
+                                }`}
+                              >
+                                {isHomeDelivery ? 'Entrega a domicilio' : 'Punto de recogida'}
+                              </span>
+                              <span className="px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-700 font-medium">
+                                Plazo: {quote.transitDays}
+                              </span>
+                              {quote.trackingIncluded !== false && (
+                                <span className="px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-700">
+                                  Con seguimiento
+                                </span>
+                              )}
+                              <span className="px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-600">
+                                Caja neutra
+                              </span>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ================================================================= */}
+      {/* PASO 3: REVISIÓN, MENSAJERÍA, CUPÓN Y PAGO SEGURO                 */}
+      {/* ================================================================= */}
+      {step === 3 && (
+        <div className="bg-white border border-neutral-200 shadow-xs">
+          <div className="p-6 border-b border-neutral-200">
+            <h2 className="font-serif text-2xl font-bold text-neutral-900">
+              3. Revisión del Pedido y Pago Seguro
+            </h2>
+            <p className="text-xs text-neutral-500 mt-1">
+              Verifica el método de mensajería discreta, aplica tu cupón si dispones de uno y confirma el pago.
+            </p>
+          </div>
+
+          <div className="p-6 space-y-6">
+            {/* Recipient & Account Summary */}
+            <div className="p-4 border border-neutral-200 bg-neutral-50/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 text-neutral-900 font-semibold">
+                  <MapPin className="w-4 h-4 text-teal-800 shrink-0" />
+                  <span>
+                    Enviar a: {formValues.name} · {formValues.phone}
+                  </span>
+                </div>
+                <p className="text-neutral-600 pl-6">
+                  {formValues.street}, {formValues.postalCode} {formValues.city} ({formValues.state}),{' '}
+                  {formValues.country}
+                </p>
+                <p className="text-neutral-500 pl-6">
+                  {user ? (
+                    <span>
+                      Cuenta vinculada: <strong className="text-neutral-800">{user.email}</strong> ·
+                      Sumarás <strong className="text-teal-800">+{finalTotals.estimatedPoints} pts VIP</strong>
+                    </span>
+                  ) : (
+                    <span>
+                      Completando pedido como Invitado:{' '}
+                      <strong className="text-neutral-800">{formValues.email}</strong>
+                    </span>
+                  )}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => goToStep(2)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-neutral-300 bg-white hover:border-neutral-900 text-neutral-800 font-medium shrink-0 cursor-pointer self-start sm:self-center whitespace-nowrap"
+              >
+                <Edit2 className="w-3.5 h-3.5" />
+                <span>Editar datos</span>
+              </button>
+            </div>
+
+            {/* Packlink Carrier Selection */}
+            {packlinkQuotes.length > 0 && (
+              <div className="space-y-2.5">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-neutral-700">
+                  Método de Envío Discreto Seleccionado (Packlink PRO)
+                </h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {packlinkQuotes.map((quote) => {
+                    const isSelected = selectedQuote?.serviceId === quote.serviceId;
+                    const isFreeOption =
+                      finalTotals.qualifiesForFreeStandard && quote.serviceId === cheapestQuoteId;
+                    const isHomeDelivery = quote.homeDelivery !== false && !quote.requiresDropoffPoint;
+
+                    return (
+                      <button
+                        key={quote.serviceId}
+                        type="button"
+                        onClick={() => setSelectedQuoteId(quote.serviceId)}
+                        className={`p-4 border text-left transition-all cursor-pointer flex flex-col justify-between gap-2 ${
+                          isSelected
+                            ? 'border-[#0f2d27] bg-teal-50/30 ring-1 ring-[#0f2d27]'
+                            : 'border-neutral-200 hover:border-neutral-400 bg-white'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="text-xs min-w-0">
+                            <p className="font-bold text-neutral-900 truncate">{quote.carrierName}</p>
+                            <p className="text-neutral-600 mt-0.5 font-medium">
+                              {quote.serviceName}
+                            </p>
+                          </div>
+                          <div className="text-right shrink-0 font-mono text-xs font-bold tabular-nums">
+                            {isFreeOption ? (
+                              <div>
+                                <span className="text-emerald-700 block">{t('GRATIS')}</span>
+                                {quote.price > 0 && (
+                                  <span className="text-[10px] text-neutral-400 line-through font-normal">
+                                    {formatPrice(quote.price)}
+                                  </span>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-neutral-900">{formatPrice(quote.price)}</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                          <span
+                            className={`px-1.5 py-0.5 rounded font-semibold ${
+                              isHomeDelivery
+                                ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                                : 'bg-amber-50 text-amber-800 border border-amber-200'
+                            }`}
+                          >
+                            {isHomeDelivery ? 'Entrega a domicilio' : 'Punto de recogida'}
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-700 font-medium">
+                            Plazo: {quote.transitDays}
+                          </span>
+                          {quote.trackingIncluded !== false && (
+                            <span className="px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-700">
+                              Seguimiento online
+                            </span>
+                          )}
+                          <span className="px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-600">
+                            Embalaje 100% neutro
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Payment Method Choice */}
+            <div className="space-y-2.5">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-neutral-700">
+                Método de Pago Cifrado
+              </h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setSelectedPaymentMethod('card')}
+                  className={`p-4 border text-left transition-all cursor-pointer flex items-center justify-between gap-3 ${
+                    selectedPaymentMethod === 'card'
+                      ? 'border-[#0f2d27] bg-teal-50/30 ring-1 ring-[#0f2d27]'
+                      : 'border-neutral-200 hover:border-neutral-400 bg-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="h-10 w-10 rounded-full bg-teal-900/10 text-teal-900 flex items-center justify-center shrink-0">
+                      <CreditCard className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <p className="font-semibold text-xs text-neutral-900">
+                        Tarjeta de Crédito / Débito
+                      </p>
+                      <p className="text-[11px] text-neutral-500">
+                        Cargo discreto · Pasarela Hilow SSL
+                      </p>
+                    </div>
+                  </div>
+                  <Lock className="h-4 w-4 text-teal-800 shrink-0" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSelectedPaymentMethod('bizum')}
+                  className={`p-4 border text-left transition-all cursor-pointer flex items-center justify-between gap-3 ${
+                    selectedPaymentMethod === 'bizum'
+                      ? 'border-[#0f2d27] bg-teal-50/30 ring-1 ring-[#0f2d27]'
+                      : 'border-neutral-200 hover:border-neutral-400 bg-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="h-10 w-10 rounded-full bg-teal-900/10 text-teal-900 flex items-center justify-center shrink-0">
+                      <Smartphone className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <p className="font-semibold text-xs text-neutral-900">
+                        Bizum / Pago Móvil
+                      </p>
+                      <p className="text-[11px] text-neutral-500">
+                        Autorización instantánea desde tu banco
+                      </p>
+                    </div>
+                  </div>
+                  <ShieldCheck className="h-4 w-4 text-teal-800 shrink-0" />
+                </button>
+              </div>
+            </div>
+
+            {/* Coupon / Promo Code */}
+            <div className="space-y-2">
+              <label className="block text-xs font-bold uppercase tracking-wider text-neutral-700">
+                Cupón o Código Promocional
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder="Ej. MONDISSA10 o CHLOE25"
+                  value={appliedPromo ? appliedPromo.code : couponInput}
+                  onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                  disabled={couponLoading || Boolean(appliedPromo)}
+                  className="flex-1 border border-neutral-300 px-3 py-2.5 text-xs uppercase font-mono outline-none focus:border-teal-800 disabled:bg-neutral-100"
+                />
+                {appliedPromo ? (
+                  <button
+                    type="button"
+                    onClick={removePromoCode}
+                    className="px-4 py-2.5 border border-neutral-300 hover:border-rose-500 text-rose-700 text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <X className="h-4 w-4" />
+                    <span>Quitar</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleApplyCoupon}
+                    disabled={couponLoading || !couponInput.trim()}
+                    className="px-5 py-2.5 bg-neutral-900 hover:bg-teal-900 text-white text-xs font-semibold uppercase tracking-wider disabled:opacity-40 cursor-pointer whitespace-nowrap"
+                  >
+                    {couponLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Aplicar'}
+                  </button>
+                )}
+              </div>
+
+              {appliedPromo && (
+                <div className="px-3.5 py-2.5 bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs flex items-center justify-between">
+                  <span className="flex items-center gap-2 font-medium">
+                    {appliedPromo.discountType === 'free_shipping' ? (
+                      <Truck className="h-4 w-4 text-emerald-700 shrink-0" />
+                    ) : (
+                      <Tag className="h-4 w-4 text-emerald-700 shrink-0" />
+                    )}
+                    <span>
+                      Cupón activo: <strong>{appliedPromo.code}</strong> ·{' '}
+                      {appliedPromo.discountType === 'free_shipping'
+                        ? '100% Envío Gratis'
+                        : appliedPromo.discountType === 'percent'
+                        ? `${appliedPromo.discountValue}% de descuento`
+                        : `${formatPrice(appliedPromo.discountValue)} ${t('de descuento')}`}
+                    </span>
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Final Price Summary */}
+            <div className="p-5 bg-neutral-50 border border-neutral-200 space-y-2.5 text-sm tabular-nums">
+              <div className="flex justify-between text-neutral-600">
+                <span>
+                  {t('Subtotal')} ({totalUnits} {t('prendas')})
+                </span>
+                <span>{formatPrice(finalTotals.subtotal)}</span>
+              </div>
+              {volumeDiscount > 0 && (
+                <div className="flex justify-between text-rose-700 font-medium">
+                  <span>
+                    {t('Descuento Pack Volumen')} (-{volumeDiscountPercent}%)
+                  </span>
+                  <span>-{formatPrice(volumeDiscount)}</span>
+                </div>
+              )}
+              {cartDiscount > 0 && appliedPromo && (
+                <div className="flex justify-between text-rose-700 font-medium">
+                  <span>
+                    {t('Descuento Cupón')} ({appliedPromo.code})
+                  </span>
+                  <span>-{formatPrice(cartDiscount)}</span>
+                </div>
+              )}
+              <div className="flex justify-between items-center text-neutral-600">
+                <span>
+                  {t('Envío Mensajería')}
+                  {selectedQuote ? ` (${selectedQuote.carrierName})` : ''}
+                </span>
+                <span
+                  className={
+                    finalTotals.isFreeShipping ? 'font-semibold text-emerald-700' : 'text-neutral-900'
+                  }
+                >
+                  {finalTotals.isFreeShipping
+                    ? appliedPromo?.discountType === 'free_shipping'
+                      ? t('Gratis (Cupón aplicado)')
+                      : t('Gratis')
+                    : packlinkLoading
+                    ? t('Calculando...')
+                    : formatPrice(finalTotals.shippingCost)}
+                </span>
+              </div>
+              <div className="border-t border-neutral-200 pt-3 flex justify-between items-baseline font-bold text-xl text-neutral-900">
+                <span>{t('Total a Pagar')}</span>
+                <span className="font-mono text-[#0f2d27]">{formatPrice(finalTotals.total)}</span>
+              </div>
+              {currency !== 'EUR' && (
+                <p className="text-[11px] text-neutral-500 text-right">
+                  {t('Conversión estimada BCE · Cobro final en pasarela en EUR')}:{' '}
+                  <strong className="font-mono text-neutral-700">
+                    {formatEur(finalTotals.total)}
+                  </strong>
+                </p>
+              )}
+            </div>
+
+            {/* Step 3 Granular Validation / Gateway Error Panel */}
+            {(payStepDetail || paymentError) && (
+              <div className="p-4 bg-rose-50 border border-rose-200 text-rose-900 text-xs space-y-2.5">
+                <div className="flex items-center gap-2 font-bold text-sm">
+                  <AlertTriangle className="h-4 w-4 text-rose-600 shrink-0" />
+                  <span>
+                    {payStepDetail?.title ||
+                      (paymentErrorKind === 'local'
+                        ? 'Error al guardar el pedido'
+                        : 'No se pudo iniciar la pasarela de pago')}
+                  </span>
+                </div>
+
+                {payStepDetail && payStepDetail.items.length > 0 && (
+                  <ul className="list-disc pl-5 space-y-1 text-rose-800">
+                    {payStepDetail.items.map((line, i) => (
+                      <li key={i}>{line}</li>
+                    ))}
+                  </ul>
+                )}
+
+                {paymentError && (
+                  <div className="space-y-1">
+                    <p className="font-medium break-words">{paymentError}</p>
+                    <p className="text-rose-700">
+                      {paymentErrorKind === 'local'
+                        ? 'Comprueba tu conexión a internet. No se ha realizado ningún cargo.'
+                        : 'Tu pedido ha quedado registrado sin cargo. Puedes reintentar la conexión con la pasarela.'}
+                    </p>
+                  </div>
+                )}
+
+                {payStepDetail?.hint && (
+                  <p className="pt-2 border-t border-rose-200 text-rose-800">{payStepDetail.hint}</p>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPayStepDetail(null);
+                    setPaymentError(null);
+                    setPaymentErrorKind(null);
+                  }}
+                  className="px-3 py-1.5 border border-rose-300 bg-white hover:bg-rose-100 text-rose-900 font-semibold cursor-pointer"
+                >
+                  Ocultar detalle
+                </button>
+              </div>
+            )}
+
+            {/* Primary Pay Button */}
+            <button
+              type="button"
+              disabled={submittingOrder || cart.length === 0}
+              onClick={handleFinalSubmit}
+              className="w-full py-4 px-6 bg-[#0f2d27] hover:bg-neutral-900 disabled:opacity-50 text-white text-sm font-bold uppercase tracking-widest transition-colors flex items-center justify-center gap-2.5 shadow-md cursor-pointer"
+            >
+              {submittingOrder ? (
+                <>
+                  <Loader2 className="w-5 h-5 animate-spin text-teal-300" />
+                  <span>Conectando de forma segura...</span>
+                </>
+              ) : (
+                <>
+                  <Lock className="w-4 h-4 text-teal-300" />
+                  <span>
+                    {t('Pagar de Forma Segura')} · {formatPrice(finalTotals.total)}
+                    {currency !== 'EUR' ? ` (${formatEur(finalTotals.total)})` : ''}
+                  </span>
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* STEP NAVIGATION BUTTONS */}
+      <div className="mt-8 flex items-center justify-between gap-4">
+        {step > 1 ? (
+          <button
+            type="button"
+            onClick={() => goToStep(step - 1)}
+            className="px-5 py-3 border border-neutral-300 bg-white hover:border-neutral-900 text-neutral-800 text-xs font-semibold uppercase tracking-wider flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            <span>Paso Anterior</span>
+          </button>
+        ) : (
+          <div />
+        )}
+
+        {step === 1 && cart.length > 0 && (
+          <button
+            type="button"
+            onClick={handleContinueFromStep1}
+            className="px-7 py-3.5 bg-neutral-900 hover:bg-[#0f2d27] text-white text-xs font-bold uppercase tracking-wider flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap"
+          >
+            <span>Continuar con mis Datos</span>
+            <ArrowRight className="h-4 w-4" />
+          </button>
+        )}
+
+        {step === 2 && (
+          <button
+            type="button"
+            onClick={handleContinueFromStep2}
+            disabled={packlinkLoading || registerLoading}
+            className="px-7 py-3.5 bg-neutral-900 hover:bg-[#0f2d27] disabled:opacity-50 text-white text-xs font-bold uppercase tracking-wider flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap"
+          >
+            {packlinkLoading || registerLoading ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin text-teal-300" />
+                <span>
+                  {registerLoading ? 'Creando tu cuenta VIP...' : 'Calculando tarifa de envío...'}
+                </span>
+              </>
+            ) : (
+              <>
+                <span>
+                  {user
+                    ? 'Continuar al Pago'
+                    : checkoutMode === 'register'
+                    ? 'Crear Cuenta y Continuar al Pago'
+                    : checkoutMode === 'guest'
+                    ? 'Continuar como Invitado al Pago'
+                    : 'Continuar'}
+                </span>
+                <ArrowRight className="h-4 w-4" />
+              </>
+            )}
+          </button>
+        )}
+      </div>
+
+      {/* Hilow Gateway Modal */}
+      {hilowSession && (
+        <HilowCheckoutModal
+          isOpen={hilowSession.isOpen}
+          onClose={() => setHilowSession(null)}
+          orderId={hilowSession.orderId}
+          amountInCents={hilowSession.amountInCents}
+          productName={hilowSession.productName}
+          customerEmail={hilowSession.customerEmail}
+          paymentUrl={hilowSession.paymentUrl}
+          initialMethod={selectedPaymentMethod}
+          onSuccess={() => handlePaymentVerified(hilowSession.orderObj)}
+        />
+      )}
+    </div>
+  );
+};

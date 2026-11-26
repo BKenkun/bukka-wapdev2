@@ -51,10 +51,19 @@ interface RelatedVideo {
   isVerified: boolean
 }
 
-function formatTimeAgo(dateString: string): string {
+function formatTimeAgo(dateString: string, useRelative: boolean): string {
   const date = new Date(dateString)
+  if (Number.isNaN(date.getTime())) return ""
+  if (!useRelative) {
+    return date.toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      timeZone: "UTC",
+    })
+  }
   const now = new Date()
-  const diffInSeconds = Math.floor((now.getTime() - date.getTime()) / 1000)
+  const diffInSeconds = Math.max(0, Math.floor((now.getTime() - date.getTime()) / 1000))
 
   if (diffInSeconds < 60) return "a few seconds ago"
   if (diffInSeconds < 3600) return `${Math.floor(diffInSeconds / 60)} min ago`
@@ -80,6 +89,11 @@ export function RelatedContentTabs({
   const [newComment, setNewComment] = useState("")
   const [submitting, setSubmitting] = useState(false)
   const [reportTarget, setReportTarget] = useState<string | null>(null)
+  const [hasMounted, setHasMounted] = useState(false)
+
+  useEffect(() => {
+    setHasMounted(true)
+  }, [])
 
   // Fetch related videos when tab is activated
   useEffect(() => {
@@ -297,7 +311,7 @@ export function RelatedContentTabs({
                               fontSize: "12px",
                             }}
                           >
-                            {formatTimeAgo(comment.createdAt)}
+                            {formatTimeAgo(comment.createdAt, hasMounted)}
                           </span>
                         </div>
                         <p
@@ -378,7 +392,7 @@ export function RelatedContentTabs({
                                 fontWeight: 400,
                               }}
                             >
-                              · {formatTimeAgo(reply.createdAt)}
+                              · {formatTimeAgo(reply.createdAt, hasMounted)}
                             </span>
                           </div>
                           <p

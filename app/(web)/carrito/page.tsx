@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react"
 import Image from "next/image"
 import Link from "next/link"
+import { safeParseJson } from "@/lib/safe-json"
 
 interface CartItem {
   id: string
@@ -39,13 +40,16 @@ export default function CarritoPage() {
   useEffect(() => {
     const fetchCart = async () => {
       try {
-        const res = await fetch("/api/cart")
+        const res = await fetch("/api/cart", {
+          cache: "no-store",
+          credentials: "include",
+        })
         if (res.ok) {
-          const data = await res.json()
-          setCart(data.cart)
+          const data = await safeParseJson<{ cart?: CartData | null }>(res)
+          if (data && "cart" in data) setCart(data.cart ?? null)
         }
-      } catch (error) {
-        console.error("Error fetching cart:", error)
+      } catch {
+        // ignore network error
       } finally {
         setLoading(false)
       }
@@ -56,14 +60,17 @@ export default function CarritoPage() {
 
   const refetchCart = async () => {
     try {
-      const res = await fetch("/api/cart")
+      const res = await fetch("/api/cart", {
+        cache: "no-store",
+        credentials: "include",
+      })
       if (res.ok) {
-        const data = await res.json()
-        setCart(data.cart)
+        const data = await safeParseJson<{ cart?: CartData | null }>(res)
+        if (data && "cart" in data) setCart(data.cart ?? null)
         window.dispatchEvent(new CustomEvent("cart-updated"))
       }
-    } catch (error) {
-      console.error("Error fetching cart:", error)
+    } catch {
+      // ignore network error
     }
   }
 
@@ -75,14 +82,15 @@ export default function CarritoPage() {
       const res = await fetch("/api/cart", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ itemId, quantity: newQuantity }),
       })
 
       if (res.ok) {
         await refetchCart()
       }
-    } catch (error) {
-      console.error("Error updating quantity:", error)
+    } catch {
+      // ignore network error
     } finally {
       setUpdating(null)
     }
@@ -92,15 +100,16 @@ export default function CarritoPage() {
     setUpdating(itemId)
 
     try {
-      const res = await fetch(`/api/cart?itemId=${itemId}`, {
+      const res = await fetch(`/api/cart?itemId=${encodeURIComponent(itemId)}`, {
         method: "DELETE",
+        credentials: "include",
       })
 
       if (res.ok) {
         await refetchCart()
       }
-    } catch (error) {
-      console.error("Error removing item:", error)
+    } catch {
+      // ignore network error
     } finally {
       setUpdating(null)
     }

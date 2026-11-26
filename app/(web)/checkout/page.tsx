@@ -9,6 +9,7 @@ import { toast } from "sonner"
 import { ShippingCalculator, FreeShippingProgress } from "@/components/checkout/shipping-calculator"
 import { Checkbox } from "@/components/ui/checkbox"
 import { ReferralCodeInput, type AppliedReferral } from "@/components/referral-code-input"
+import { safeParseJson } from "@/lib/safe-json"
 
 interface CartItem {
   id: string
@@ -108,10 +109,13 @@ export default function CheckoutPage() {
 
     const fetchCart = async () => {
       try {
-        const res = await fetch("/api/cart")
+        const res = await fetch("/api/cart", {
+          cache: "no-store",
+          credentials: "include",
+        })
         if (res.ok) {
-          const data = await res.json()
-          if (!data.cart || data.cart.items.length === 0) {
+          const data = await safeParseJson<{ cart?: CartData | null }>(res)
+          if (!data?.cart || data.cart.items.length === 0) {
             router.push("/carrito")
             return
           }
@@ -124,8 +128,8 @@ export default function CheckoutPage() {
             }))
           }
         }
-      } catch (error) {
-        console.error("Error fetching cart:", error)
+      } catch {
+        toast.error("Error loading cart")
       } finally {
         setLoading(false)
       }
@@ -167,26 +171,35 @@ export default function CheckoutPage() {
       const res = await fetch("/api/promo-codes/validate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({
           code: promoCodeInput.trim(),
           subtotal: cart?.total ?? 0,
         }),
       })
 
-      const data = await res.json()
+      const data = await safeParseJson<{
+        valid?: boolean
+        code?: string
+        discountType?: "PERCENTAGE" | "FIXED_AMOUNT"
+        discountValue?: number
+        discountAmount?: number
+        message?: string
+        error?: string
+      }>(res)
 
-      if (res.ok && data.valid) {
+      if (res.ok && data?.valid && data.code && data.discountType) {
         setAppliedPromoCode({
           code: data.code,
           discountType: data.discountType,
-          discountValue: data.discountValue,
-          discountAmount: data.discountAmount,
+          discountValue: Number(data.discountValue ?? 0),
+          discountAmount: Number(data.discountAmount ?? 0),
         })
-        toast.success(data.message)
+        if (data.message) toast.success(data.message)
       } else {
-        setPromoCodeError(data.error || "Invalid code")
+        setPromoCodeError(data?.error || "Invalid code")
       }
-    } catch (error) {
+    } catch {
       setPromoCodeError("Error validating code")
     } finally {
       setPromoCodeLoading(false)
@@ -216,9 +229,10 @@ export default function CheckoutPage() {
       const res = await fetch("/api/orders", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({
           shippingAddress,
-          paymentGateway: paymentMethod === "card" ? "easierpay" : paymentMethod,
+          paymentGateway: paymentMethod === "card" ? "card" : paymentMethod,
           shippingRateId: selectedShippingRate?.id,
           shippingMethod: selectedShippingRate?.name,
           shippingCost: selectedShippingRate?.price ?? 0,
@@ -229,37 +243,43 @@ export default function CheckoutPage() {
         }),
       })
 
-      if (!res.ok) {
-        const error = await res.json()
-        toast.error(error.error || "Error processing your order")
+      const data = await safeParseJson<{
+        error?: string
+        order?: { id: string; orderNumber: string; total: number }
+      }>(res)
+
+      if (!res.ok || !data?.order?.id) {
+        toast.error(data?.error || "Error processing your order. Please try again.")
         return
       }
 
-      const data = await res.json()
-
-      // Step 2: For card payments, redirect to EasierPay
+      // Step 2: For card payments, redirect to the active payment gateway (EasierPay or Hilow)
       if (paymentMethod === "card") {
         toast.info("Redirecting to payment gateway...")
 
-        const payRes = await fetch("/api/payments/easierpay/initiate", {
+        const payRes = await fetch("/api/payments/initiate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          credentials: "include",
           body: JSON.stringify({ orderId: data.order.id }),
         })
 
-        if (payRes.ok) {
-          const payData = await payRes.json()
-          if (payData.payLink) {
-            window.location.href = payData.payLink
-            return
-          }
+        const payData = await safeParseJson<{
+          payLink?: string
+          error?: string
+        }>(payRes)
+
+        if (payRes.ok && payData?.payLink) {
+          window.location.href = payData.payLink
+          return
         }
 
-        // If EasierPay initiation fails, show error but order is created
-        const payError = await payRes.json().catch(() => null)
-        toast.error(payError?.error || "Error connecting to the payment gateway. You can retry from your order history.")
-        // Redirect to result page with failed status
-        router.push(`/checkout/resultado?order=${data.order.orderNumber}&status=failed`)
+        // If payment gateway initiation fails, show error while preserving the order
+        toast.error(
+          payData?.error ||
+            "Error connecting to the payment gateway. You can retry from your order history."
+        )
+        router.push(`/checkout/resultado?order=${encodeURIComponent(data.order.orderNumber)}&status=failed`)
         return
       }
 
@@ -271,7 +291,7 @@ export default function CheckoutPage() {
       setStep("confirmation")
       toast.success("Order placed successfully!")
     } catch (error) {
-      console.error("Error placing order:", error)
+      console.warn("Checkout order submission failed:", error)
       toast.error("Error processing your order")
     } finally {
       setSubmitting(false)

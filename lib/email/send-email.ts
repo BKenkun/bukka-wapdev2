@@ -1,9 +1,11 @@
 import { render } from "@react-email/components"
-import { resend, EMAIL_FROM, EMAIL_REPLY_TO } from "./resend"
+import { resend, isResendConfigured, EMAIL_FROM, EMAIL_REPLY_TO } from "./resend"
 import { isMailjetConfigured, sendViaMailjet } from "./mailjet"
 import { prisma } from "@/lib/prisma"
 import type { SendEmailOptions, EmailResult, EmailSettings } from "./types"
 import { DEFAULT_EMAIL_SETTINGS } from "./types"
+
+let warnedNoEmailProvider = false
 
 // Get email settings from database
 async function getEmailSettings(): Promise<EmailSettings> {
@@ -66,7 +68,30 @@ export async function sendEmail({
     let messageId: string | undefined
     let sendError: { message: string } | undefined
 
-    if (isMailjetConfigured()) {
+    const hasMailjet = isMailjetConfigured()
+    const hasResend = isResendConfigured()
+
+    if (!hasMailjet && !hasResend) {
+      if (!warnedNoEmailProvider) {
+        warnedNoEmailProvider = true
+        console.warn("[Email] Neither Mailjet nor Resend is configured. Skipping email delivery.")
+      }
+      await prisma.emailLog
+        .create({
+          data: {
+            to,
+            subject,
+            template,
+            status: "skipped",
+            error: "No email provider configured",
+            metadata: metadata as object,
+          },
+        })
+        .catch(() => undefined)
+      return { success: false, error: new Error("Email provider not configured") }
+    }
+
+    if (hasMailjet) {
       // Proveedor: Mailjet (prioritario si hay claves configuradas)
       const htmlBody = html ?? (react ? await render(react) : undefined)
       if (!htmlBody) {

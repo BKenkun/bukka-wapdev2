@@ -1,10 +1,11 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import Link from "next/link"
+import { useRouter } from "next/navigation"
 import { Bell, Calendar, Check, Loader2 } from "lucide-react"
 import { useCountdown } from "@/components/coming-soon-card"
 import { useAuthModal } from "@/components/auth/auth-modal-provider"
+import { safeParseJson } from "@/lib/safe-json"
 
 interface Performer {
   name: string
@@ -48,6 +49,7 @@ export function VideoComingSoonCard({
   variant = "overlay",
   onExpire,
 }: VideoComingSoonCardProps) {
+  const router = useRouter()
   const timeLeft = useCountdown(releaseDate, onExpire)
   const { openAuthModal } = useAuthModal()
   const [subscribed, setSubscribed] = useState(false)
@@ -57,13 +59,28 @@ export function VideoComingSoonCard({
   const notifyIdentifier = videoId || slug
   const pad = (n: number) => n.toString().padStart(2, "0")
 
+  const handleCardClick = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest("button")) return
+    router.push(`/videos/${slug}`)
+  }
+
+  const handleCardKeyDown = (e: React.KeyboardEvent) => {
+    if ((e.target as HTMLElement).closest("button")) return
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault()
+      router.push(`/videos/${slug}`)
+    }
+  }
+
   useEffect(() => {
     if (!notifyIdentifier) return
     let active = true
-    fetch(`/api/videos/${encodeURIComponent(notifyIdentifier)}/notify`)
-      .then((r) => r.json())
+    fetch(`/api/videos/${encodeURIComponent(notifyIdentifier)}/notify`, {
+      credentials: "include",
+    })
+      .then((r) => (r.ok ? safeParseJson<{ subscribed?: boolean }>(r) : null))
       .then((data) => {
-        if (active) setSubscribed(Boolean(data.subscribed))
+        if (active && data) setSubscribed(Boolean(data.subscribed))
       })
       .catch(() => {})
     return () => {
@@ -79,13 +96,15 @@ export function VideoComingSoonCard({
     try {
       const res = await fetch(`/api/videos/${encodeURIComponent(notifyIdentifier)}/notify`, {
         method: "POST",
+        credentials: "include",
       })
       if (res.status === 401) {
         openAuthModal({ view: "login" })
         return
       }
       if (!res.ok) return
-      const data = await res.json()
+      const data = await safeParseJson<{ subscribed?: boolean }>(res)
+      if (!data) return
       setSubscribed(Boolean(data.subscribed))
       setJustToggled(true)
       setTimeout(() => setJustToggled(false), 2500)
@@ -272,7 +291,13 @@ export function VideoComingSoonCard({
 
   if (variant === "below") {
     return (
-      <Link href={`/videos/${slug}`} className="group block cursor-pointer">
+      <div
+        role="link"
+        tabIndex={0}
+        onClick={handleCardClick}
+        onKeyDown={handleCardKeyDown}
+        className="group block cursor-pointer"
+      >
         <div className="mb-3">{mediaFrame}</div>
         <div className="flex flex-col">
           <h3
@@ -299,13 +324,19 @@ export function VideoComingSoonCard({
             )}
           </div>
         </div>
-      </Link>
+      </div>
     )
   }
 
   return (
-    <Link href={`/videos/${slug}`} className="group block cursor-pointer overflow-hidden">
+    <div
+      role="link"
+      tabIndex={0}
+      onClick={handleCardClick}
+      onKeyDown={handleCardKeyDown}
+      className="group block cursor-pointer overflow-hidden"
+    >
       {mediaFrame}
-    </Link>
+    </div>
   )
 }

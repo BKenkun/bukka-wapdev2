@@ -1,7 +1,7 @@
 "use client"
 
 import { Search, LogOut } from "lucide-react"
-import { useState, useEffect } from "react"
+import { Suspense, useState, useEffect } from "react"
 import Link from "next/link"
 import { useSession, signOut } from "next-auth/react"
 import { useSearchParams, useRouter } from "next/navigation"
@@ -27,9 +27,7 @@ interface HeaderActionsProps {
   guestMenu?: GuestMenuData | null
 }
 
-export function HeaderActions({ guestMenu }: HeaderActionsProps) {
-  const [isSearchOpen, setIsSearchOpen] = useState(false)
-  const { data: session, status } = useSession()
+function AuthQueryParamsHandler() {
   const { openAuthModal } = useAuthModal()
   const searchParams = useSearchParams()
   const router = useRouter()
@@ -80,6 +78,14 @@ export function HeaderActions({ guestMenu }: HeaderActionsProps) {
       router.replace("/", { scroll: false })
     }
   }, [searchParams, router, openAuthModal])
+
+  return null
+}
+
+export function HeaderActions({ guestMenu }: HeaderActionsProps) {
+  const [isSearchOpen, setIsSearchOpen] = useState(false)
+  const { data: session, status } = useSession()
+  const { openAuthModal } = useAuthModal()
 
   const handleSignOut = () => {
     clearStoredSessionActivity()
@@ -146,6 +152,9 @@ export function HeaderActions({ guestMenu }: HeaderActionsProps) {
         <CartButton />
       </div>
 
+      <Suspense fallback={null}>
+        <AuthQueryParamsHandler />
+      </Suspense>
       <SearchModal open={isSearchOpen} onOpenChange={setIsSearchOpen} />
     </>
   )

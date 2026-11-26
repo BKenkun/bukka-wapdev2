@@ -64,10 +64,19 @@ interface VideoDetailLayoutProps {
   categoryIds: string[]
 }
 
-function formatTimeAgo(dateString: string): string {
+function formatTimeAgo(dateString: string, useRelative: boolean): string {
   const date = new Date(dateString)
+  if (Number.isNaN(date.getTime())) return ""
+  if (!useRelative) {
+    return date.toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      timeZone: "UTC",
+    })
+  }
   const now = new Date()
-  const diffInSeconds = Math.floor((now.getTime() - date.getTime()) / 1000)
+  const diffInSeconds = Math.max(0, Math.floor((now.getTime() - date.getTime()) / 1000))
 
   if (diffInSeconds < 60) return "a few seconds ago"
   if (diffInSeconds < 3600) return `${Math.floor(diffInSeconds / 60)} min ago`
@@ -126,6 +135,11 @@ export function VideoDetailLayout({
   const [newComment, setNewComment] = useState("")
   const [submitting, setSubmitting] = useState(false)
   const [visibleVideoCount, setVisibleVideoCount] = useState(6)
+  const [hasMounted, setHasMounted] = useState(false)
+
+  useEffect(() => {
+    setHasMounted(true)
+  }, [])
 
   // Fetch related videos
   useEffect(() => {
@@ -422,7 +436,7 @@ export function VideoDetailLayout({
                           {comment.author.name}
                         </span>
                         <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-                          {formatTimeAgo(comment.createdAt)}
+                          {formatTimeAgo(comment.createdAt, hasMounted)}
                         </span>
                       </div>
                       <p className="text-sm mt-1" style={{ color: "color-mix(in srgb, var(--text-primary) 80%, transparent)" }}>
@@ -464,7 +478,7 @@ export function VideoDetailLayout({
                                 {reply.author.name}
                               </span>
                               <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-                                {formatTimeAgo(reply.createdAt)}
+                                {formatTimeAgo(reply.createdAt, hasMounted)}
                               </span>
                             </div>
                             <p className="text-sm mt-1" style={{ color: "color-mix(in srgb, var(--text-primary) 80%, transparent)" }}>

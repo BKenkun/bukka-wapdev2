@@ -499,7 +499,7 @@ export default async function ModelDetailPage({ params }: ModelDetailPageProps) 
                         marginTop: "8px",
                       }}
                     >
-                      {latestRelease.viewCount.toLocaleString()} views
+                      {latestRelease.viewCount.toLocaleString("en-US")} views
                     </p>
                   </div>
                 </div>
@@ -528,8 +528,8 @@ export default async function ModelDetailPage({ params }: ModelDetailPageProps) 
                   key={video.id}
                   title={video.title}
                   subtitle={performer.name}
-                  views={video.viewCount.toLocaleString()}
-                  likes={video.likeCount.toLocaleString()}
+                  views={video.viewCount.toLocaleString("en-US")}
+                  likes={video.likeCount.toLocaleString("en-US")}
                   imageUrl={video.thumbnailUrl || "/images/2.jpg"}
                   previewUrl={video.previewUrl}
                   previewStartTime={video.previewStartTime}

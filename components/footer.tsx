@@ -122,13 +122,13 @@ async function getFooterMenuItems(slug: string, userTierLevel: number | null): P
           })
           return {
             label: item.label,
-            url: page ? `/p/${page.slug}` : item.url || "#",
+            url: (page ? `/p/${page.slug}` : item.url || "#").trim(),
             openInNewTab: item.openInNewTab,
           }
         }
         return {
           label: item.label,
-          url: item.url || "#",
+          url: (item.url || "#").trim(),
           openInNewTab: item.openInNewTab,
         }
       })

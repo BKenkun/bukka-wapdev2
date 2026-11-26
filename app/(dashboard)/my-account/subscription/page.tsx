@@ -1,8 +1,11 @@
 import { AccountNav } from "@/components/account-nav"
 import { SectionHeader } from "@/components/section-header"
 import { SubscriptionPlansClient } from "./subscription-plans-client"
+import { CancelHilowSubscriptionButton } from "./cancel-hilow-subscription-button"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/prisma"
+import { getUserHilowSubscription } from "@/lib/hilow"
+import { formatPaymentGatewayLabel } from "@/lib/payment-settings"
 import { redirect } from "next/navigation"
 import Link from "next/link"
 
@@ -29,7 +32,7 @@ export default async function SuscripcionPage() {
     redirect("/login")
   }
 
-  const [user, subscriptionPlans, billingHistory] = await Promise.all([
+  const [user, subscriptionPlans, billingHistory, hilowSubscription] = await Promise.all([
     prisma.user.findUnique({
       where: { id: session.user.id },
       include: {
@@ -50,16 +53,21 @@ export default async function SuscripcionPage() {
       orderBy: { createdAt: "desc" },
       take: 5,
     }),
+    getUserHilowSubscription(session.user.id),
   ])
 
   if (!user) {
     redirect("/login")
   }
 
-  const isActive = user.subscriptionEnd && new Date(user.subscriptionEnd) > new Date()
+  const isActive = Boolean(user.subscriptionEnd && new Date(user.subscriptionEnd) > new Date())
   const currentPlan = user.SubscriptionPlan
   const currentPlanName = currentPlan?.name || "Visitor"
   const isFreeOrNoPlan = !currentPlan || currentPlan.isFree
+  const latestGateway = billingHistory[0]?.paymentGateway || (hilowSubscription ? "hilow" : null)
+  const isActiveHilowSubscription = Boolean(
+    isActive && !isFreeOrNoPlan && hilowSubscription?.subscriptionId && latestGateway === "hilow"
+  )
 
   // Get current plan price
   const currentPlanPrice = currentPlan ? Number(currentPlan.monthlyPrice) : 0
@@ -170,7 +178,9 @@ export default async function SuscripcionPage() {
                 </span>
                 {isActive && (
                   <span className="font-montserrat text-[14px] font-normal leading-5" style={{ color: "var(--text-muted)" }}>
-                    • Auto-renews
+                    {isActiveHilowSubscription && hilowSubscription?.cancelAtPeriodEnd
+                      ? "• Ends on " + formatDate(user.subscriptionEnd)
+                      : "• Auto-renews"}
                   </span>
                 )}
               </div>
@@ -222,7 +232,7 @@ export default async function SuscripcionPage() {
                   <div className="flex flex-col">
                     <span className="font-montserrat text-[14px] font-medium leading-5" style={{ color: "var(--text-primary)" }}>Payment method</span>
                     <span className="font-montserrat text-[14px] font-medium leading-5" style={{ color: "var(--text-primary)" }}>
-                      {billingHistory.length > 0 ? billingHistory[0].paymentGateway : "Not configured"}
+                      {formatPaymentGatewayLabel(latestGateway)}
                     </span>
                   </div>
                 </div>
@@ -278,8 +288,16 @@ export default async function SuscripcionPage() {
                       Billing cycle information
                     </span>
                     <span className="font-montserrat text-[14px] font-normal leading-5" style={{ color: "var(--text-primary)" }}>
-                      Your subscription will auto-renew on {formatDate(user.subscriptionEnd)}. You will be charged {currentPlanPrice.toFixed(2)} € for the next billing period. You can cancel at any time before the renewal date.
+                      {isActiveHilowSubscription && hilowSubscription?.cancelAtPeriodEnd
+                        ? `Your subscription is cancelled and will remain active until ${formatDate(user.subscriptionEnd)}. You will not be charged again.`
+                        : `Your subscription will auto-renew on ${formatDate(user.subscriptionEnd)}. You will be charged ${currentPlanPrice.toFixed(2)} € for the next billing period. You can cancel at any time before the renewal date.`}
                     </span>
+                    {isActiveHilowSubscription && hilowSubscription && (
+                      <CancelHilowSubscriptionButton
+                        cancelAtPeriodEnd={hilowSubscription.cancelAtPeriodEnd}
+                        periodEndFormatted={formatDate(user.subscriptionEnd)}
+                      />
+                    )}
                   </div>
                 </div>
               )}

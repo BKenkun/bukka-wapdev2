@@ -50,7 +50,7 @@ export async function getHeaderMenu({ userTierLevel }: GetHeaderMenuOptions): Pr
     const itemsWithMegamenu: NavItemWithMegamenu[] = await Promise.all(
       filteredItems.map(async (item): Promise<NavItemWithMegamenu> => {
         // Resolve page URL if needed
-        let url = item.url || "#"
+        let url = (item.url || "#").trim()
         if (item.pageId) {
           const page = await prisma.page.findUnique({
             where: { id: item.pageId, status: "PUBLISHED" },

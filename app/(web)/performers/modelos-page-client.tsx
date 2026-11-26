@@ -106,7 +106,7 @@ export function ModelosPageClient({
               </p>
               <p className="text-sm font-normal" style={{ color: "var(--text-muted)", fontFamily: "var(--global-font)" }}>
                 Showing {totalCount > 0 ? skip + 1 : 0}-{Math.min(skip + pageSize, totalCount)} of{" "}
-                {totalCount.toLocaleString()} performers
+                {totalCount.toLocaleString("en-US")} performers
               </p>
             </div>
 
