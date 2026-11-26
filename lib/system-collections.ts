@@ -57,6 +57,10 @@ const videoSelect = {
   publishedAt: true,
   releaseDate: true,
   duration: true,
+  minTierPlan: { select: { level: true } },
+  isDiamondExclusive: true,
+  isLimitedEdition: true,
+  limitedAccessUntil: true,
   performers: {
     include: {
       performer: {

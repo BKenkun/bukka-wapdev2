@@ -4,6 +4,7 @@ import { auth } from "@/auth"
 import { releaseDueVideos } from "@/lib/video-release"
 import { getPublicVideoPoolWhere, isVideoNew, isVideoScheduled } from "@/lib/video-status"
 import { setVideoDownloadOverride } from "@/lib/get-video-download-policy"
+import { getVideoToken, getVideoPreviewUrl, isMuxSigningConfigured } from "@/lib/mux/client"
 
 // POST - Crear video (admin only)
 export async function POST(request: NextRequest) {
@@ -316,42 +317,50 @@ export async function GET(request: NextRequest) {
     ])
 
     // Transformar respuesta con preview URL de video MP4 (sin exponer preview/stream para programados)
-    const transformedVideos = videos.map((video) => {
-      const scheduled = isVideoScheduled(video, nowMs)
-      let previewVideoUrl: string | null = null
+    const transformedVideos = await Promise.all(
+      videos.map(async (video) => {
+        const scheduled = isVideoScheduled(video, nowMs)
+        let previewVideoUrl: string | null = null
 
-      if (!scheduled) {
-        previewVideoUrl = video.previewUrl
-        if (video.muxPlaybackId) {
-          // Usar MP4 medium quality (960x540) para preview
-          previewVideoUrl = `https://stream.mux.com/${video.muxPlaybackId}/medium.mp4`
+        if (!scheduled) {
+          // Respetar preview custom (R2) primero; si no existe, firmar capped-1080p.mp4 de Mux
+          previewVideoUrl = video.previewUrl || null
+          if (!previewVideoUrl && video.muxPlaybackId && isMuxSigningConfigured()) {
+            try {
+              const token = await getVideoToken(video.muxPlaybackId)
+              previewVideoUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "capped-1080p")
+            } catch (error) {
+              console.warn(`Failed to generate preview token for video ${video.id}:`, error)
+            }
+          }
         }
-      }
 
-      return {
-        id: video.id,
-        slug: video.slug,
-        title: video.title,
-        description: video.description,
-        thumbnailUrl: video.thumbnailUrl,
-        previewUrl: previewVideoUrl,
-        // Preview time settings for frontend
-        previewStartTime: video.previewStartTime,
-        previewEndTime: video.previewEndTime,
-        duration: video.duration,
-        releaseDate: video.releaseDate,
-        comingSoon: scheduled,
-        isNew: isVideoNew(video, nowMs),
-        viewCount: video.viewCount,
-        likeCount: video.likeCount,
-        minTierPlan: video.minTierPlan,
-        isLimitedEdition: video.isLimitedEdition,
-        isDiamondExclusive: video.isDiamondExclusive,
-        performers: video.performers.map((vp) => vp.performer),
-        categories: video.categories.map((vc) => vc.category),
-        tags: video.tags.map((vt) => vt.tag),
-      }
-    })
+        return {
+          id: video.id,
+          slug: video.slug,
+          title: video.title,
+          description: video.description,
+          thumbnailUrl: video.thumbnailUrl,
+          previewUrl: previewVideoUrl,
+          // Preview time settings for frontend
+          previewStartTime: video.previewStartTime,
+          previewEndTime: video.previewEndTime,
+          duration: video.duration,
+          releaseDate: video.releaseDate,
+          comingSoon: scheduled,
+          isNew: isVideoNew(video, nowMs),
+          viewCount: video.viewCount,
+          likeCount: video.likeCount,
+          minTierPlan: video.minTierPlan,
+          isLimitedEdition: video.isLimitedEdition,
+          limitedAccessUntil: video.limitedAccessUntil,
+          isDiamondExclusive: video.isDiamondExclusive,
+          performers: video.performers.map((vp) => vp.performer),
+          categories: video.categories.map((vc) => vc.category),
+          tags: video.tags.map((vt) => vt.tag),
+        }
+      })
+    )
 
     return NextResponse.json({
       videos: transformedVideos,

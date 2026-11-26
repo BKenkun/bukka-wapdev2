@@ -26,6 +26,10 @@ interface Video {
   comingSoon?: boolean
   releaseDate?: string | null
   isNew?: boolean
+  minTierLevel?: number | null
+  isDiamondExclusive?: boolean
+  isLimitedEdition?: boolean
+  limitedAccessUntil?: string | null
 }
 
 interface VideoCarouselProps {
@@ -225,6 +229,10 @@ export function VideoCarousel({ videos = [], variant = "overlay" }: VideoCarouse
               comingSoon={video.comingSoon}
               releaseDate={video.releaseDate}
               isNew={video.isNew}
+              minTierLevel={video.minTierLevel}
+              isDiamondExclusive={video.isDiamondExclusive}
+              isLimitedEdition={video.isLimitedEdition}
+              limitedAccessUntil={video.limitedAccessUntil}
             />
           </div>
         ))}

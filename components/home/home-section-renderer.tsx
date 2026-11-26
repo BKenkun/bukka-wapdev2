@@ -110,6 +110,10 @@ interface VideoData {
   comingSoon?: boolean
   releaseDate?: string | null
   isNew?: boolean
+  minTierLevel?: number | null
+  isDiamondExclusive?: boolean
+  isLimitedEdition?: boolean
+  limitedAccessUntil?: string | null
 }
 
 async function getVideosForSection(config: VideoGridConfig): Promise<VideoData[]> {
@@ -134,6 +138,10 @@ async function getVideosForSection(config: VideoGridConfig): Promise<VideoData[]
       status: string
       publishedAt: Date | null
       releaseDate: Date | null
+      minTierPlan: { level: number } | null
+      isDiamondExclusive: boolean
+      isLimitedEdition: boolean
+      limitedAccessUntil: Date | null
       performers: Array<{ performer: { name: string; slug: string } }>
       categories: Array<{ category: { name: string } }>
     }>
@@ -152,6 +160,10 @@ async function getVideosForSection(config: VideoGridConfig): Promise<VideoData[]
       status: true,
       publishedAt: true,
       releaseDate: true,
+      minTierPlan: { select: { level: true } },
+      isDiamondExclusive: true,
+      isLimitedEdition: true,
+      limitedAccessUntil: true,
       performers: { include: { performer: { select: { name: true, slug: true } } } },
       categories: { include: { category: { select: { name: true } } }, take: 1 },
     }
@@ -325,9 +337,9 @@ async function getVideosForSection(config: VideoGridConfig): Promise<VideoData[]
 
           if (!videoPreviewUrl && video.muxPlaybackId && isMuxSigningConfigured()) {
             try {
-              // Generate signed token for Mux MP4 preview
+              // Generate signed token for Mux MP4 preview (capped-1080p matches createMuxUpload)
               const token = await getVideoToken(video.muxPlaybackId)
-              videoPreviewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "medium")
+              videoPreviewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "capped-1080p")
             } catch (error) {
               console.warn(`Failed to generate preview token for video ${video.id}:`, error)
               // Fallback: leave previewUrl undefined
@@ -351,6 +363,10 @@ async function getVideosForSection(config: VideoGridConfig): Promise<VideoData[]
           comingSoon: scheduled,
           releaseDate: video.releaseDate?.toISOString() ?? null,
           isNew: isVideoNew(video, nowMs),
+          minTierLevel: video.minTierPlan?.level ?? 0,
+          isDiamondExclusive: video.isDiamondExclusive,
+          isLimitedEdition: video.isLimitedEdition,
+          limitedAccessUntil: video.limitedAccessUntil?.toISOString() ?? null,
         }
       })
     )
@@ -545,7 +561,7 @@ export async function HomeSectionRenderer({ section }: HomeSectionRendererProps)
       if (ctaConfig.bgSource === "dbVideo" && ctaConfig.dbVideoMuxPlaybackId && isMuxSigningConfigured()) {
         try {
           const token = await getVideoToken(ctaConfig.dbVideoMuxPlaybackId)
-          dbVideoUrl = getVideoPreviewUrl(ctaConfig.dbVideoMuxPlaybackId, token, "high")
+          dbVideoUrl = getVideoPreviewUrl(ctaConfig.dbVideoMuxPlaybackId, token, "capped-1080p")
         } catch (error) {
           console.warn("Failed to generate CTA banner video URL:", error)
         }

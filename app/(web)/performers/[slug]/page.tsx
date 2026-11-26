@@ -44,6 +44,7 @@ export default async function ModelDetailPage({ params }: ModelDetailPageProps) 
               slug: true,
               title: true,
               thumbnailUrl: true,
+              previewUrl: true,
               duration: true,
               viewCount: true,
               likeCount: true,
@@ -53,6 +54,10 @@ export default async function ModelDetailPage({ params }: ModelDetailPageProps) 
               status: true,
               publishedAt: true,
               releaseDate: true,
+              minTierPlan: { select: { level: true } },
+              isDiamondExclusive: true,
+              isLimitedEdition: true,
+              limitedAccessUntil: true,
               categories: {
                 include: {
                   category: {
@@ -129,12 +134,16 @@ export default async function ModelDetailPage({ params }: ModelDetailPageProps) 
       const scheduled = isVideoScheduled(video, nowMs)
       let previewUrl: string | undefined = undefined
 
-      if (!scheduled && video.muxPlaybackId && isMuxSigningConfigured()) {
-        try {
-          const token = await getVideoToken(video.muxPlaybackId)
-          previewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "medium")
-        } catch (error) {
-          console.error(`Error generating preview for video ${video.id}:`, error)
+      if (!scheduled) {
+        previewUrl = video.previewUrl || undefined
+
+        if (!previewUrl && video.muxPlaybackId && isMuxSigningConfigured()) {
+          try {
+            const token = await getVideoToken(video.muxPlaybackId)
+            previewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "capped-1080p")
+          } catch (error) {
+            console.error(`Error generating preview for video ${video.id}:`, error)
+          }
         }
       }
 
@@ -144,6 +153,8 @@ export default async function ModelDetailPage({ params }: ModelDetailPageProps) 
         comingSoon: scheduled,
         isNew: isVideoNew(video, nowMs),
         category: video.categories[0]?.category.name,
+        minTierLevel: video.minTierPlan?.level ?? 0,
+        limitedAccessUntilIso: video.limitedAccessUntil?.toISOString() ?? null,
       }
     })
   )
@@ -544,6 +555,10 @@ export default async function ModelDetailPage({ params }: ModelDetailPageProps) 
                   comingSoon={video.comingSoon}
                   releaseDate={video.releaseDate?.toISOString() ?? null}
                   isNew={video.isNew}
+                  minTierLevel={video.minTierLevel}
+                  isDiamondExclusive={video.isDiamondExclusive}
+                  isLimitedEdition={video.isLimitedEdition}
+                  limitedAccessUntil={video.limitedAccessUntilIso}
                 />
               ))}
             </div>

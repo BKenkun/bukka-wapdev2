@@ -186,6 +186,10 @@ async function CategoryPage({
         status: true,
         publishedAt: true,
         releaseDate: true,
+        minTierPlan: { select: { level: true } },
+        isDiamondExclusive: true,
+        isLimitedEdition: true,
+        limitedAccessUntil: true,
         performers: {
           include: {
             performer: {
@@ -236,7 +240,7 @@ async function CategoryPage({
         if (!videoPreviewUrl && video.muxPlaybackId && isMuxSigningConfigured()) {
           try {
             const token = await getVideoToken(video.muxPlaybackId)
-            videoPreviewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "medium")
+            videoPreviewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "capped-1080p")
           } catch (error) {
             console.warn(`Failed to generate preview token for video ${video.id}:`, error)
           }
@@ -259,6 +263,10 @@ async function CategoryPage({
         comingSoon: scheduled,
         releaseDate: video.releaseDate?.toISOString() ?? null,
         isNew: isVideoNew(video, nowMs),
+        minTierLevel: video.minTierPlan?.level ?? 0,
+        isDiamondExclusive: video.isDiamondExclusive,
+        isLimitedEdition: video.isLimitedEdition,
+        limitedAccessUntil: video.limitedAccessUntil?.toISOString() ?? null,
       }
     })
   )
@@ -364,7 +372,7 @@ async function SystemCollectionPage({
         if (!videoPreviewUrl && video.muxPlaybackId && isMuxSigningConfigured()) {
           try {
             const token = await getVideoToken(video.muxPlaybackId)
-            videoPreviewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "medium")
+            videoPreviewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "capped-1080p")
           } catch (error) {
             console.warn(`Failed to generate preview token for video ${video.id}:`, error)
           }
@@ -387,6 +395,10 @@ async function SystemCollectionPage({
         comingSoon: scheduled,
         releaseDate: video.releaseDate?.toISOString() ?? null,
         isNew: isVideoNew(video, nowMs),
+        minTierLevel: video.minTierPlan?.level ?? 0,
+        isDiamondExclusive: video.isDiamondExclusive,
+        isLimitedEdition: video.isLimitedEdition,
+        limitedAccessUntil: video.limitedAccessUntil?.toISOString() ?? null,
       }
     })
   )
@@ -669,7 +681,8 @@ async function VideoDetailPage({ slug }: { slug: string }) {
     }
   }
 
-  if (!session && video.minTierPlan) {
+  // Solo exigir sesión si el plan mínimo es Free (level >= 1) o superior; los videos de nivel Visitante (0) son públicos
+  if (!session && video.minTierPlan && video.minTierPlan.level > 0) {
     isLocked = true
     lockReason = lockConfig.messageLockedByNoSession
     requiredTier = video.minTierPlan.name

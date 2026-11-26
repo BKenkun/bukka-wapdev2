@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { auth } from "@/auth"
 import { checkVideoAccess } from "@/lib/subscription-guard"
-import { deleteMuxAsset } from "@/lib/mux/client"
+import { deleteMuxAsset, getVideoToken, getVideoPreviewUrl, isMuxSigningConfigured } from "@/lib/mux/client"
 import { deleteLocalFile } from "@/lib/file-utils"
 import { releaseDueVideos } from "@/lib/video-release"
 import { isVideoNew, isVideoScheduled } from "@/lib/video-status"
@@ -457,11 +457,15 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       }
     }
 
-    // Generar URL del preview MP4 video
-    let previewVideoUrl = video.previewUrl
-    if (video.muxPlaybackId) {
-      // Usar MP4 medium quality (960x540) para preview
-      previewVideoUrl = `https://stream.mux.com/${video.muxPlaybackId}/medium.mp4`
+    // Generar URL del preview MP4 video (respetando preview custom R2 primero)
+    let previewVideoUrl = video.previewUrl || null
+    if (!previewVideoUrl && video.muxPlaybackId && isMuxSigningConfigured()) {
+      try {
+        const token = await getVideoToken(video.muxPlaybackId)
+        previewVideoUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "capped-1080p")
+      } catch (error) {
+        console.warn(`Failed to generate preview token for video ${video.id}:`, error)
+      }
     }
 
     // Transformar respuesta

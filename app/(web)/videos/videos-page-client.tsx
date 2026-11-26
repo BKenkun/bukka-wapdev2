@@ -30,6 +30,10 @@ interface Video {
   comingSoon?: boolean
   releaseDate?: string | null
   isNew?: boolean
+  minTierLevel?: number | null
+  isDiamondExclusive?: boolean
+  isLimitedEdition?: boolean
+  limitedAccessUntil?: string | null
 }
 
 interface Category {
@@ -259,6 +263,10 @@ export function VideosPageClient({
                     comingSoon={video.comingSoon}
                     releaseDate={video.releaseDate}
                     isNew={video.isNew}
+                    minTierLevel={video.minTierLevel}
+                    isDiamondExclusive={video.isDiamondExclusive}
+                    isLimitedEdition={video.isLimitedEdition}
+                    limitedAccessUntil={video.limitedAccessUntil}
                   />
                 ))}
               </div>

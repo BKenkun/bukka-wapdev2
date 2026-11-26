@@ -227,33 +227,144 @@ export function getGifUrl(
 }
 
 /**
+ * Indica si las claves de API de Mux están configuradas para consultar assets.
+ */
+export function isMuxApiConfigured(): boolean {
+  return Boolean(process.env.MUX_TOKEN_ID && process.env.MUX_TOKEN_SECRET)
+}
+
+/**
+ * Genera URL de WebP animado de Mux (fallback universal que funciona incluso sin renditions MP4)
+ */
+export function getAnimatedWebpUrl(
+  playbackId: string,
+  token?: string,
+  options?: GifOptions
+): string {
+  const params = new URLSearchParams()
+
+  if (token) {
+    params.set("token", token)
+  }
+
+  const start = Math.max(0, options?.start ?? 0)
+  // Mux limita animated.webp/gif a un máximo de 10 segundos por clip
+  const rawEnd = options?.end !== undefined ? options.end : start + 6
+  const end = Math.max(start + 1, Math.min(rawEnd, start + 10))
+
+  params.set("start", start.toString())
+  params.set("end", end.toString())
+  params.set("fps", Math.max(8, Math.min(30, options?.fps ?? 15)).toString())
+  params.set("width", (options?.width ?? 640).toString())
+
+  return `https://image.mux.com/${playbackId}/animated.webp?${params.toString()}`
+}
+
+export type MuxMp4PreviewQuality = "capped-1080p" | "low" | "medium" | "high"
+
+/**
  * Genera URL de video MP4 para preview (mejor calidad que GIF)
- * Usa el rendition MP4 de Mux con token firmado
+ * Usa el rendition MP4 de Mux con token firmado.
+ * Por defecto usa "capped-1080p" porque createMuxUpload() crea assets con mp4_support: "capped-1080p".
  */
 export function getVideoPreviewUrl(
   playbackId: string,
   token?: string,
-  quality: "low" | "medium" | "high" = "medium"
+  quality: MuxMp4PreviewQuality = "capped-1080p"
 ): string {
-  // low = 640x360, medium = 960x540, high = 1280x720
   const baseUrl = `https://stream.mux.com/${playbackId}/${quality}.mp4`
   return token ? `${baseUrl}?token=${token}` : baseUrl
 }
 
 /**
- * Genera token para video MP4 (diferente tipo que para streaming)
+ * Genera token para video MP4 (válido 2h para que los previews en hover no caduquen a los 5 minutos)
  */
 export async function getVideoToken(playbackId: string): Promise<string> {
-  if (!signingKeyId || !signingKeySecret) {
+  const keyId = signingKeyId || process.env.MUX_SIGNING_KEY_ID
+  const keySecret = signingKeySecret || process.env.MUX_SIGNING_KEY_PRIVATE
+  if (!keyId || !keySecret) {
     throw new Error("MUX_SIGNING_KEY_ID or MUX_SIGNING_KEY_PRIVATE not configured")
   }
 
   return await mux.jwt.signPlaybackId(playbackId, {
-    keyId: signingKeyId,
-    keySecret: signingKeySecret,
+    keyId,
+    keySecret,
     type: "video",
-    expiration: "5m",
+    expiration: "2h",
   })
+}
+
+export interface ResolvedMuxPreview {
+  previewUrl: string
+  format: "mp4" | "image"
+  quality: string
+}
+
+/**
+ * Resuelve la mejor URL de preview realmente disponible en un asset de Mux:
+ * 1. Consulta static_renditions del asset (si MUX_TOKEN_ID/SECRET existen) para elegir el MP4 real
+ *    (soporta tanto assets modernos capped-1080p.mp4 como legacy medium.mp4/low.mp4/high.mp4).
+ * 2. Si el asset no tiene ningún MP4 estático listo, cae automáticamente a animated.webp firmado.
+ */
+export async function resolveMuxPreviewMedia(
+  assetId: string | null | undefined,
+  playbackId: string,
+  options?: { start?: number; end?: number }
+): Promise<ResolvedMuxPreview> {
+  if (assetId && isMuxApiConfigured()) {
+    try {
+      const asset = await getMuxAsset(assetId)
+      const staticFiles = asset.static_renditions?.files ?? []
+      const readyMp4s = staticFiles.filter(
+        (f) => f.name?.endsWith(".mp4") && (f.status === "ready" || !f.status)
+      )
+
+      // Para hover previews preferimos archivos ligeros si existen (legacy standard), o capped-1080p.mp4
+      const preferenceOrder = [
+        "medium.mp4",
+        "low.mp4",
+        "capped-1080p.mp4",
+        "high.mp4",
+      ]
+
+      const chosen =
+        preferenceOrder
+          .map((name) => readyMp4s.find((f) => f.name === name))
+          .find((f): f is NonNullable<typeof f> => Boolean(f)) ?? readyMp4s[0]
+
+      if (chosen?.name) {
+        const token = await getVideoToken(playbackId)
+        return {
+          previewUrl: `https://stream.mux.com/${playbackId}/${chosen.name}?token=${token}`,
+          format: "mp4",
+          quality: chosen.name,
+        }
+      }
+
+      // El asset existe pero no tiene renditions MP4 listos: usar animated.webp firmado
+      const gifToken = await getGifToken(playbackId)
+      return {
+        previewUrl: getAnimatedWebpUrl(playbackId, gifToken, {
+          start: options?.start,
+          end: options?.end,
+          fps: 15,
+          width: 640,
+        }),
+        format: "image",
+        quality: "animated.webp",
+      }
+    } catch (error) {
+      console.warn(`[Mux] Could not inspect static renditions for asset ${assetId}:`, error)
+    }
+  }
+
+  // Fallback directo si no se pudo consultar el asset: capped-1080p.mp4
+  const token = await getVideoToken(playbackId)
+  return {
+    previewUrl: getVideoPreviewUrl(playbackId, token, "capped-1080p"),
+    format: "mp4",
+    quality: "capped-1080p.mp4",
+  }
 }
 
 /**

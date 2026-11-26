@@ -6,6 +6,7 @@ import { useEffect, useState, useRef } from "react"
 import { useSubscription } from "@/hooks/use-subscription"
 import { useAuthModal } from "@/components/auth/auth-modal-provider"
 import { VideoComingSoonCard } from "@/components/video-coming-soon-card"
+import { shouldApplyTrailerLimit } from "@/lib/video-access"
 
 // Play icon SVG component
 function PlayIcon({ className }: { className?: string }) {
@@ -39,7 +40,7 @@ interface Performer {
   slug: string
 }
 
-interface VideoCardProps {
+export interface VideoCardProps {
   title: string
   subtitle?: string
   views: string
@@ -58,6 +59,10 @@ interface VideoCardProps {
   comingSoon?: boolean
   releaseDate?: string | null
   isNew?: boolean
+  minTierLevel?: number | null
+  isDiamondExclusive?: boolean
+  isLimitedEdition?: boolean
+  limitedAccessUntil?: string | null
 }
 
 export function VideoCard({
@@ -79,19 +84,56 @@ export function VideoCard({
   comingSoon = false,
   releaseDate,
   isNew = false,
+  minTierLevel = 0,
+  isDiamondExclusive = false,
+  isLimitedEdition = false,
+  limitedAccessUntil = null,
 }: VideoCardProps) {
   const router = useRouter()
   const [isHovering, setIsHovering] = useState(false)
+  const [isPreviewLoaded, setIsPreviewLoaded] = useState(false)
+  const [hasActivatedPreview, setHasActivatedPreview] = useState(false)
+  const [activePreviewUrl, setActivePreviewUrl] = useState<string | undefined>(previewUrl)
+  const [previewFormat, setPreviewFormat] = useState<"video" | "image">("video")
+  const [previewFailed, setPreviewFailed] = useState(false)
   const [showTrailerLimit, setShowTrailerLimit] = useState(false)
   const [liveUnlocked, setLiveUnlocked] = useState(false)
+
   const videoRef = useRef<HTMLVideoElement>(null)
   const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null)
-  const { canViewTrailer, trackTrailerView, isAuthenticated } = useSubscription()
+  const hasTriedFallbackRef = useRef(false)
+  const isHoveringRef = useRef(false)
+
+  const {
+    canViewTrailer,
+    trackTrailerView,
+    isAuthenticated,
+    planLevel,
+    canAccessExclusive,
+    canAccessLimitedEdition,
+  } = useSubscription()
   const { openAuthModal } = useAuthModal()
+
+  // Sync active preview URL if prop changes
+  useEffect(() => {
+    setActivePreviewUrl(previewUrl)
+    setPreviewFormat("video")
+    setPreviewFailed(false)
+    setIsPreviewLoaded(false)
+    hasTriedFallbackRef.current = false
+  }, [previewUrl])
 
   useEffect(() => {
     setLiveUnlocked(false)
   }, [comingSoon, releaseDate])
+
+  useEffect(() => {
+    return () => {
+      if (hoverTimeoutRef.current) {
+        clearTimeout(hoverTimeoutRef.current)
+      }
+    }
+  }, [])
 
   const handleComingSoonExpire = () => {
     setLiveUnlocked(true)
@@ -121,45 +163,150 @@ export function VideoCard({
   const showNewBadge = isNew || liveUnlocked
   const effectiveVideoId = videoId || slug
 
-  const handleMouseEnter = () => {
-    // Sin preview no hay trailer que limitar: no consumimos slot
-    if (!previewUrl) return
+  // Solo aplicar límite de trailers a videos con restricción Free (level >= 1) o superior
+  // (o exclusivos / edición limitada activa) cuando el usuario NO tiene acceso completo
+  const needsTrailerLimit = shouldApplyTrailerLimit(
+    {
+      isAuthenticated,
+      planLevel,
+      canAccessExclusive,
+      canAccessLimitedEdition,
+    },
+    {
+      minTierLevel,
+      isDiamondExclusive,
+      isLimitedEdition,
+      limitedAccessUntil,
+    }
+  )
 
-    // Check if visitor can view more trailers
-    if (!canViewTrailer(effectiveVideoId)) {
+  const tryResolvePreviewFallback = async () => {
+    if (hasTriedFallbackRef.current || !slug) {
+      setPreviewFailed(true)
+      setIsPreviewLoaded(false)
+      return
+    }
+    hasTriedFallbackRef.current = true
+
+    try {
+      const res = await fetch(`/api/videos/${encodeURIComponent(slug)}/preview`)
+      if (!res.ok) {
+        setPreviewFailed(true)
+        setIsPreviewLoaded(false)
+        return
+      }
+      const data = await res.json()
+      if (data?.previewUrl && data.previewUrl !== activePreviewUrl) {
+        setPreviewFormat(data.format === "image" ? "image" : "video")
+        setActivePreviewUrl(data.previewUrl)
+        setPreviewFailed(false)
+        return
+      }
+      setPreviewFailed(true)
+      setIsPreviewLoaded(false)
+    } catch {
+      setPreviewFailed(true)
+      setIsPreviewLoaded(false)
+    }
+  }
+
+  const startPreviewPlayback = () => {
+    setIsHovering(true)
+    isHoveringRef.current = true
+
+    // Si ya tenemos URL de preview válida, activamos la carga del elemento media
+    if (activePreviewUrl && !previewFailed) {
+      setHasActivatedPreview(true)
+      if (previewFormat === "video" && videoRef.current) {
+        if (videoRef.current.readyState >= 2) {
+          videoRef.current.currentTime = previewStartTime
+          videoRef.current.play().catch(() => {
+            // Autoplay blocked or aborted: keep thumbnail visible
+          })
+        } else {
+          videoRef.current.play().catch(() => {})
+        }
+      }
+      return
+    }
+
+    // Si no vino previewUrl en SSR pero podría resolverse on-demand, intentar una vez
+    if (!activePreviewUrl && !hasTriedFallbackRef.current && slug) {
+      setHasActivatedPreview(true)
+      void tryResolvePreviewFallback()
+    }
+  }
+
+  const handleMouseEnter = () => {
+    if (hoverTimeoutRef.current) {
+      clearTimeout(hoverTimeoutRef.current)
+    }
+
+    // Si el video tiene restricción y el usuario ya agotó sus 3 trailers, bloquear inmediatamente
+    if (needsTrailerLimit && !canViewTrailer(effectiveVideoId)) {
       setShowTrailerLimit(true)
       return
     }
 
-    // Small delay before starting preview to avoid accidental triggers
+    // Small delay before starting preview to avoid accidental triggers while scrolling
     hoverTimeoutRef.current = setTimeout(() => {
-      // Track the trailer view when it starts
-      const canView = trackTrailerView(effectiveVideoId)
-      if (!canView) {
+      if (needsTrailerLimit && !canViewTrailer(effectiveVideoId)) {
         setShowTrailerLimit(true)
         return
       }
-
-      setIsHovering(true)
-      if (videoRef.current) {
-        videoRef.current.currentTime = previewStartTime
-        videoRef.current.play().catch(() => {
-          // Autoplay might be blocked, ignore error
-        })
-      }
-    }, 300)
+      startPreviewPlayback()
+    }, 220)
   }
 
   const handleMouseLeave = () => {
     if (hoverTimeoutRef.current) {
       clearTimeout(hoverTimeoutRef.current)
     }
+    isHoveringRef.current = false
     setIsHovering(false)
+    setIsPreviewLoaded(false)
     setShowTrailerLimit(false)
     if (videoRef.current) {
       videoRef.current.pause()
-      videoRef.current.currentTime = previewStartTime
+      try {
+        videoRef.current.currentTime = previewStartTime
+      } catch {
+        // Ignore seek errors if metadata isn't loaded yet
+      }
     }
+  }
+
+  const handleVideoLoadedMetadata = () => {
+    const el = videoRef.current
+    if (!el || !isHoveringRef.current) return
+    if (previewStartTime > 0 && el.duration && previewStartTime < el.duration) {
+      el.currentTime = previewStartTime
+    }
+    el.play().catch(() => {})
+  }
+
+  const handlePreviewStarted = () => {
+    if (!isHoveringRef.current) return
+
+    // Solo contabilizar el trailer cuando el preview realmente empieza a reproducirse
+    if (needsTrailerLimit) {
+      const allowed = trackTrailerView(effectiveVideoId)
+      if (!allowed) {
+        setIsPreviewLoaded(false)
+        setIsHovering(false)
+        isHoveringRef.current = false
+        if (videoRef.current) videoRef.current.pause()
+        setShowTrailerLimit(true)
+        return
+      }
+    }
+
+    setIsPreviewLoaded(true)
+  }
+
+  const handleVideoError = () => {
+    setIsPreviewLoaded(false)
+    void tryResolvePreviewFallback()
   }
 
   const handleTimeUpdate = () => {
@@ -169,6 +316,12 @@ export function VideoCard({
   }
 
   const handleCardClick = () => {
+    // Coherencia hover + click: si el video es restringido y el usuario ya agotó sus 3 trailers,
+    // no permitir saltarse el overlay haciendo click fuera del botón CTA
+    if (needsTrailerLimit && !canViewTrailer(effectiveVideoId)) {
+      setShowTrailerLimit(true)
+      return
+    }
     router.push(`/videos/${slug}`)
   }
 
@@ -183,6 +336,8 @@ export function VideoCard({
     // Cerrar el overlay para que no tape el modal de auth
     setShowTrailerLimit(false)
     setIsHovering(false)
+    setIsPreviewLoaded(false)
+    isHoveringRef.current = false
     if (videoRef.current) videoRef.current.pause()
     if (isAuthenticated) {
       router.push("/suscripciones")
@@ -191,9 +346,15 @@ export function VideoCard({
     }
   }
 
+  // Solo ocultar la miniatura cuando el preview está realmente cargado y reproduciéndose (nunca pantalla negra)
+  const showActivePreview = isHovering && isPreviewLoaded && !previewFailed && Boolean(activePreviewUrl)
+
   // Trailer limit overlay component
   const TrailerLimitOverlay = () => (
-    <div className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center z-30 p-4 text-center">
+    <div
+      onClick={(e) => e.stopPropagation()}
+      className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center z-30 p-4 text-center"
+    >
       <Lock className="w-12 h-12 mb-3" style={{ color: "var(--brand-color)" }} />
       <h4 className="text-white font-bold text-lg mb-2">Trailer limit reached</h4>
       <p className="text-sm mb-4" style={{ color: "var(--text-muted)" }}>
@@ -232,6 +393,47 @@ export function VideoCard({
           </span>
         ))}
       </span>
+    )
+  }
+
+  // Preview media layer (video MP4 o animated.webp fallback), montado lazy en hover
+  const renderPreviewMedia = () => {
+    if (!hasActivatedPreview || !activePreviewUrl || previewFailed) return null
+
+    if (previewFormat === "image") {
+      return (
+        <img
+          src={activePreviewUrl}
+          alt=""
+          onLoad={handlePreviewStarted}
+          onError={() => {
+            setPreviewFailed(true)
+            setIsPreviewLoaded(false)
+          }}
+          className={`absolute inset-0 w-full h-full object-cover object-left transition-opacity duration-300 ${
+            showActivePreview ? "opacity-100" : "opacity-0"
+          }`}
+        />
+      )
+    }
+
+    return (
+      <video
+        ref={videoRef}
+        src={activePreviewUrl}
+        autoPlay
+        muted
+        playsInline
+        preload="metadata"
+        loop={!previewEndTime}
+        onLoadedMetadata={handleVideoLoadedMetadata}
+        onPlaying={handlePreviewStarted}
+        onError={handleVideoError}
+        onTimeUpdate={previewEndTime ? handleTimeUpdate : undefined}
+        className={`absolute inset-0 w-full h-full object-cover object-left transition-opacity duration-300 ${
+          showActivePreview ? "opacity-100" : "opacity-0"
+        }`}
+      />
     )
   }
 
@@ -279,30 +481,17 @@ export function VideoCard({
             </div>
           )}
 
-          {/* Thumbnail image */}
+          {/* Thumbnail image — stays visible until preview is actually playing */}
           <img
             src={imageUrl || "/placeholder.svg"}
             alt={title}
             className={`absolute inset-0 w-full h-full object-cover object-left transition-all duration-300 ${
-              isHovering && previewUrl ? "opacity-0" : "opacity-100 group-hover:scale-105"
+              showActivePreview ? "opacity-0" : "opacity-100 group-hover:scale-105"
             }`}
           />
 
-          {/* Preview video */}
-          {previewUrl && (
-            <video
-              ref={videoRef}
-              src={previewUrl}
-              muted
-              playsInline
-              preload="auto"
-              loop={!previewEndTime}
-              onTimeUpdate={previewEndTime ? handleTimeUpdate : undefined}
-              className={`absolute inset-0 w-full h-full object-cover object-left transition-opacity duration-300 ${
-                isHovering ? "opacity-100" : "opacity-0"
-              }`}
-            />
-          )}
+          {/* Preview video / animated image */}
+          {renderPreviewMedia()}
         </div>
 
         {/* Content below */}
@@ -371,30 +560,17 @@ export function VideoCard({
           </div>
         )}
 
-        {/* Thumbnail image */}
+        {/* Thumbnail image — stays visible until preview is actually playing */}
         <img
           src={imageUrl || "/placeholder.svg"}
           alt={title}
           className={`absolute inset-0 w-full h-full object-cover object-left transition-opacity duration-300 ${
-            isHovering && previewUrl ? "opacity-0" : "opacity-100"
+            showActivePreview ? "opacity-0" : "opacity-100"
           }`}
         />
 
-        {/* Preview video */}
-        {previewUrl && (
-          <video
-            ref={videoRef}
-            src={previewUrl}
-            muted
-            playsInline
-            preload="auto"
-            loop={!previewEndTime}
-            onTimeUpdate={previewEndTime ? handleTimeUpdate : undefined}
-            className={`absolute inset-0 w-full h-full object-cover object-left transition-opacity duration-300 ${
-              isHovering ? "opacity-100" : "opacity-0"
-            }`}
-          />
-        )}
+        {/* Preview video / animated image */}
+        {renderPreviewMedia()}
 
         {/* Dark gradient overlay for text readability */}
         <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent" />

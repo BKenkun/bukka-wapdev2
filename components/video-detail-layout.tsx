@@ -52,7 +52,14 @@ interface RelatedVideo {
   views: string
   likes: string
   imageUrl: string
+  previewUrl?: string
+  previewStartTime?: number
+  previewEndTime?: number
   isVerified: boolean
+  minTierLevel?: number | null
+  isDiamondExclusive?: boolean
+  isLimitedEdition?: boolean
+  limitedAccessUntil?: string | null
 }
 
 interface VideoDetailLayoutProps {
@@ -157,18 +164,32 @@ export function VideoDetailLayout({
                 slug: string
                 title: string
                 thumbnailUrl: string
+                previewUrl?: string | null
+                previewStartTime?: number
+                previewEndTime?: number
                 viewCount: number
                 likeCount: number
-                performers?: { performer: { name: string } }[]
+                minTierPlan?: { level: number } | null
+                isDiamondExclusive?: boolean
+                isLimitedEdition?: boolean
+                limitedAccessUntil?: string | null
+                performers?: Array<{ name?: string; performer?: { name: string } }>
               }) => ({
                 id: v.id,
                 slug: v.slug,
                 title: v.title,
-                subtitle: v.performers?.[0]?.performer?.name || "",
+                subtitle: v.performers?.[0]?.name || v.performers?.[0]?.performer?.name || "",
                 views: formatViews(v.viewCount),
                 likes: `${Math.min(99, Math.round((v.likeCount / Math.max(v.viewCount, 1)) * 100 + 80))}%`,
                 imageUrl: v.thumbnailUrl || "/placeholder-video.jpg",
+                previewUrl: v.previewUrl || undefined,
+                previewStartTime: v.previewStartTime,
+                previewEndTime: v.previewEndTime,
                 isVerified: true,
+                minTierLevel: v.minTierPlan?.level ?? 0,
+                isDiamondExclusive: v.isDiamondExclusive ?? false,
+                isLimitedEdition: v.isLimitedEdition ?? false,
+                limitedAccessUntil: v.limitedAccessUntil ?? null,
               })
             )
           )

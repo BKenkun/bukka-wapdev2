@@ -3,7 +3,8 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react"
 
 const TRAILER_LIMIT = 3
-const TRAILERS_KEY = "bukka_trailers_viewed"
+const TRAILERS_KEY = "bukka_trailers_viewed_v2"
+const LEGACY_TRAILERS_KEY = "bukka_trailers_viewed"
 const DAY_MS = 24 * 60 * 60 * 1000
 
 interface TrailerData {
@@ -27,6 +28,8 @@ export function SubscriptionProvider({ children }: { children: React.ReactNode }
   useEffect(() => {
     if (typeof window === "undefined") return
     try {
+      // Limpiar clave antigua donde se contaban videos sin restricción
+      localStorage.removeItem(LEGACY_TRAILERS_KEY)
       const stored = localStorage.getItem(TRAILERS_KEY)
       if (!stored) return
       const data: TrailerData = JSON.parse(stored)

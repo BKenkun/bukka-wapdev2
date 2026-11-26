@@ -100,6 +100,10 @@ export default async function VideosPage({
         status: true,
         publishedAt: true,
         releaseDate: true,
+        minTierPlan: { select: { level: true } },
+        isDiamondExclusive: true,
+        isLimitedEdition: true,
+        limitedAccessUntil: true,
         performers: {
           include: {
             performer: {
@@ -157,9 +161,9 @@ export default async function VideosPage({
 
         if (!videoPreviewUrl && video.muxPlaybackId && isMuxSigningConfigured()) {
           try {
-            // Generate signed token for Mux MP4 preview
+            // Generate signed token for Mux MP4 preview (capped-1080p matches createMuxUpload)
             const token = await getVideoToken(video.muxPlaybackId)
-            videoPreviewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "medium")
+            videoPreviewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "capped-1080p")
           } catch (error) {
             console.warn(`Failed to generate preview token for video ${video.id}:`, error)
             // Fallback: leave previewUrl undefined
@@ -183,6 +187,10 @@ export default async function VideosPage({
         comingSoon: scheduled,
         releaseDate: video.releaseDate?.toISOString() ?? null,
         isNew: isVideoNew(video, nowMs),
+        minTierLevel: video.minTierPlan?.level ?? 0,
+        isDiamondExclusive: video.isDiamondExclusive,
+        isLimitedEdition: video.isLimitedEdition,
+        limitedAccessUntil: video.limitedAccessUntil?.toISOString() ?? null,
       }
     })
   )

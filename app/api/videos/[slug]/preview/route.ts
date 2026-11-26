@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getVideoToken, getVideoPreviewUrl, isMuxSigningConfigured } from "@/lib/mux/client"
+import {
+  isMuxSigningConfigured,
+  resolveMuxPreviewMedia,
+} from "@/lib/mux/client"
 import { releaseDueVideos } from "@/lib/video-release"
 import { isVideoScheduled } from "@/lib/video-status"
 
@@ -9,14 +12,12 @@ interface RouteParams {
 }
 
 /**
- * GET - Obtiene la URL del preview video MP4 con token firmado
+ * GET - Obtiene la URL del preview (R2 custom, MP4 estático real de Mux o animated.webp firmado)
  */
 export async function GET(request: NextRequest, { params }: RouteParams) {
   try {
     await releaseDueVideos()
     const { slug } = await params
-    const { searchParams } = new URL(request.url)
-    const quality = (searchParams.get("quality") as "low" | "medium" | "high") || "medium"
 
     const video = await prisma.video.findUnique({
       where: { slug },
@@ -24,6 +25,8 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
         id: true,
         status: true,
         releaseDate: true,
+        previewUrl: true,
+        muxAssetId: true,
         muxPlaybackId: true,
         previewStartTime: true,
         previewEndTime: true,
@@ -63,6 +66,21 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       )
     }
 
+    // 1. Prioridad: preview custom (p. ej. MP4 subido a R2)
+    if (video.previewUrl) {
+      return NextResponse.json({
+        previewUrl: video.previewUrl,
+        playbackId: video.muxPlaybackId,
+        format: "mp4",
+        quality: "custom",
+        options: {
+          start: video.previewStartTime,
+          end: video.previewEndTime,
+          duration: Math.max(0, video.previewEndTime - video.previewStartTime),
+        },
+      })
+    }
+
     if (!video.muxPlaybackId) {
       return NextResponse.json(
         { error: "The video has not been processed in Mux yet" },
@@ -78,21 +96,25 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       })
     }
 
-    // Generar token firmado para el video MP4
-    const token = await getVideoToken(video.muxPlaybackId)
-
-    // Generar URL del MP4 con token
-    const previewUrl = getVideoPreviewUrl(video.muxPlaybackId, token, quality)
+    // 2. Resolver rendition MP4 real disponible en Mux (o fallback animated.webp firmado)
+    const resolved = await resolveMuxPreviewMedia(
+      video.muxAssetId,
+      video.muxPlaybackId,
+      {
+        start: video.previewStartTime,
+        end: video.previewEndTime,
+      }
+    )
 
     return NextResponse.json({
-      previewUrl,
+      previewUrl: resolved.previewUrl,
       playbackId: video.muxPlaybackId,
-      format: "mp4",
-      quality,
+      format: resolved.format,
+      quality: resolved.quality,
       options: {
         start: video.previewStartTime,
         end: video.previewEndTime,
-        duration: video.previewEndTime - video.previewStartTime,
+        duration: Math.max(0, video.previewEndTime - video.previewStartTime),
       },
     })
   } catch (error) {

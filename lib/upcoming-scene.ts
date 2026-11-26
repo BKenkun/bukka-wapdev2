@@ -181,7 +181,7 @@ async function resolveVideoBackground(
   if (!resolvedVideoUrl && video.muxPlaybackId && isMuxSigningConfigured()) {
     try {
       const token = await getVideoToken(video.muxPlaybackId)
-      resolvedVideoUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "high")
+      resolvedVideoUrl = getVideoPreviewUrl(video.muxPlaybackId, token, "capped-1080p")
     } catch (error) {
       console.warn(`Failed to sign Mux preview for Upcoming Scene video ${video.id}:`, error)
     }
